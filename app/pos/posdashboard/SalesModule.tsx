@@ -785,7 +785,8 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
               if (ingQtyToRestore !== 0) {
                 inventoryRecords.push({
-                  id: `LEDG_${crypto.randomUUID().replace(/-/g, "").substring(0, 16)}`,
+                  // THE FIX: Deterministic ID based on Sale ID and SKU
+                  id: `RES_${selectedSale.id}_${ingSku}`,
                   company_id: companyId,
                   store_id: selectedSale.store_id || null,
                   product_id: null,
@@ -799,7 +800,8 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
             });
           } else {
             inventoryRecords.push({
-              id: `LEDG_${crypto.randomUUID().replace(/-/g, "").substring(0, 16)}`,
+              // THE FIX: Deterministic ID based on Sale ID and SKU
+              id: `RES_${selectedSale.id}_${item.sku || item.product_id}`,
               company_id: companyId,
               store_id: selectedSale.store_id || null,
               product_id: item.product_id || null,
