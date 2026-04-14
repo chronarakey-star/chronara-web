@@ -1,0 +1,54 @@
+How to Vercel:
+
+The Chronara Key Edit Workflow
+
+Step 1: Enter the Workshop
+Whenever you sit down to code, you need to be inside your specific project folder.
+
+    Open PowerShell or your VS Code terminal.
+
+    If you are in C:\Users\adamm\Desktop\Files\Programming Projects\ADA Books, type:
+    Bash
+
+    cd chronara-web
+
+    (You must always be in the chronara-web folder before running any web commands).
+
+Step 2: Turn on the Local Sandbox
+You never want to test new code directly on your live website. You always test locally first.
+
+    In that terminal, type:
+    Bash
+
+    npm run dev
+
+    Open your browser and go to http://localhost:3000.
+    This is your private testing ground. The best part about Next.js is "Hot Reloading"—the moment you press Save on a file in VS Code, your browser will instantly update to show the change. No refreshing required.
+
+Step 3: Make Your Edits
+To change what a page looks like, you just find its folder in VS Code. In Next.js, the app folder is the map of your website.
+
+    To edit the Login Screen: Open app/page.tsx and change the code.
+
+    To edit the Time Clock: Open app/dashboard/page.tsx and change the code.
+
+    To create a New Page (like app.chronarakey.com/pos): You simply create a new folder inside app named pos, and create a file inside it named page.tsx.
+
+Step 4: Push to the Internet
+Once your edits look perfect on your local sandbox, it's time to send them to the live website.
+
+    Go to your terminal running the sandbox and press Ctrl + C (then type Y and Enter) to stop the local engine.
+
+    Run your three deployment commands:
+    Bash
+
+    git add .
+    git commit -m "Write a quick note about what you changed"
+    git push
+
+What happens next?
+The exact second you hit Enter on git push, your computer sends the new code to GitHub. Vercel is constantly watching GitHub. It sees the new code, grabs it, builds it, and silently updates app.chronarakey.com. Within about 60 seconds, your edits are live for your employees.
+
+That is the entire lifecycle of a web app update! You build it locally, test it locally, and push it to the cloud.
+
+Would you like me to clarify any part of this workflow, or are you ready to copy that roadmap, open a fresh chat, and start building the Time Clock logic?
