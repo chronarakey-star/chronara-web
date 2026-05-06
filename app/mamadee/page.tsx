@@ -175,20 +175,70 @@ export default function MamaDeeApp() {
     setView('edit');
   };
 
-  const handleDeleteRecipe = async (e: React.MouseEvent, id: string) => {
-    e.stopPropagation(); // Stop the card from opening
-    setOpenMenuId(null); // Close the menu
+  const handleDeleteRecipe = async (e: React.MouseEvent, recipe: Recipe) => {
+    e.stopPropagation(); 
+    setOpenMenuId(null); 
 
-    const confirmDelete = window.confirm("Are you sure you want to permanently delete this recipe?");
+    const confirmDelete = window.confirm("Are you sure you want to permanently delete this recipe? This will also delete any attached photos and audio.");
     if (!confirmDelete) return;
 
-    const { error } = await supabase.from('mamadee').delete().eq('id', id);
+    setLoading(true);
+
+    const filesToDelete: string[] = [];
     
-    if (error) {
-      alert(`Failed to delete recipe: ${error.message}`);
-    } else {
-      fetchRecipes(); // Refresh the list
+    // Brute-force path extraction:
+    // Finds the bucket name and grabs everything after it, exactly as Supabase generated it.
+    const extractPath = (url: string) => {
+      if (!url) return null;
+      const marker = 'mamadee_media/';
+      const index = url.indexOf(marker);
+      if (index !== -1) {
+        return url.substring(index + marker.length);
+      }
+      return null;
+    };
+
+    // 1. Extract Main Image
+    if (recipe.media_urls?.main_image) {
+      const path = extractPath(recipe.media_urls.main_image);
+      if (path) filesToDelete.push(path);
     }
+
+    // 2. Extract Step Audio
+    recipe.steps?.forEach(step => {
+      if (step.audio_url) {
+        console.log("Raw Audio URL from database:", step.audio_url); // <--- DEBUG LOG
+        const path = extractPath(step.audio_url);
+        if (path) {
+          console.log("Extracted Path for deletion:", path); // <--- DEBUG LOG
+          filesToDelete.push(path);
+        }
+      }
+    });
+
+    console.log("Final array sent to Supabase delete:", filesToDelete);
+
+    // 3. Delete from Storage
+    if (filesToDelete.length > 0) {
+      const { data: storageData, error: storageError } = await supabase.storage.from('mamadee_media').remove(filesToDelete);
+      
+      if (storageError) {
+        console.error("Storage Deletion Error:", storageError);
+      } else {
+        console.log("Successfully deleted from storage:", storageData);
+      }
+    }
+
+    // 4. Delete from Database
+    const { error: dbError } = await supabase.from('mamadee').delete().eq('id', recipe.id);
+    
+    if (dbError) {
+      alert(`Failed to delete recipe: ${dbError.message}`);
+    } else {
+      fetchRecipes(); 
+    }
+    
+    setLoading(false);
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -231,7 +281,8 @@ export default function MamaDeeApp() {
     const cleanedFormData = {
       ...formData,
       ingredients: formData.ingredients.filter(ing => ing.name.trim() !== ''),
-      steps: formData.steps.filter(step => step.text.trim() !== ''),
+      // NEW: Only delete the step if BOTH the text is empty AND there is no audio
+      steps: formData.steps.filter(step => step.text.trim() !== '' || !!step.audio_url),
       servings: typeof formData.servings === 'string' ? parseFloat(formData.servings) || 1 : formData.servings
     };
 
@@ -285,7 +336,7 @@ export default function MamaDeeApp() {
 
             <div>
               <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Recipe Title</label>
-              <input type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full bg-[#333] border border-[#555] rounded-md p-3 text-white focus:border-[#C53636] outline-none" placeholder="e.g. Grandma's Famous Lasagna"/>
+              <input type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full bg-[#333] border border-[#555] rounded-md p-3 text-white focus:border-[#C53636] outline-none" placeholder="e.g. Nunny's Stuffed Peppers"/>
             </div>
             
             <div>
@@ -554,7 +605,7 @@ export default function MamaDeeApp() {
                     <div className="fixed inset-0 z-20 cursor-default" onClick={(e) => { e.stopPropagation(); setOpenMenuId(null); }} />
                     <div className="absolute top-11 right-2 z-30 bg-[#1E1E1E] border border-[#555] rounded-md shadow-xl py-1 w-36">
                       <button
-                        onClick={(e) => handleDeleteRecipe(e, recipe.id!)}
+                        onClick={(e) => handleDeleteRecipe(e, recipe)}
                         className="w-full text-left px-4 py-2 text-[#C53636] hover:bg-[#333] transition-colors font-bold text-sm"
                       >
                         Delete Recipe
