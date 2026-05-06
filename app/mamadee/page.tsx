@@ -31,6 +31,9 @@ interface Recipe {
   steps: Step[];
   media_urls: {
     main_image?: string;
+    main_audio?: string;
+    main_video?: string;
+    gallery?: string[];
   };
 }
 
@@ -252,8 +255,8 @@ export default function MamaDeeApp() {
           <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444] space-y-4">
             <div className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-[#555] rounded-xl bg-[#1E1E1E]">
               {formData.media_urls?.main_image ? (
-                <div className="relative w-full h-40 md:h-48 mb-4">
-                  <img src={formData.media_urls.main_image} alt="Recipe" className="w-full h-full object-cover rounded-lg shadow-md" />
+                <div className="relative w-full aspect-square md:aspect-auto md:h-48 mb-4">
+                  <img src={formData.media_urls.main_image} alt="Recipe" className="w-full h-full object-contain md:object-cover rounded-lg shadow-md bg-[#111]" />
                 </div>
               ) : (
                 <span className="text-gray-500 mb-2 text-sm">No photo selected</span>
@@ -378,59 +381,67 @@ export default function MamaDeeApp() {
   }
 
   // ============================================================================
-  // VIEW: COOK MODE (MOBILE OPTIMIZED)
+  // VIEW: COOK MODE (MOBILE & PDF OPTIMIZED)
   // ============================================================================
   if (view === 'cook' && selectedRecipe) {
     return (
-      <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-3 md:p-8 pb-12">
-        <div className="flex justify-between items-center mb-4 md:mb-6 border-b border-[#444] pb-3 md:pb-4 sticky top-0 bg-[#1E1E1E] z-10 pt-2">
+      // Added print utility classes so that exporting to PDF perfectly formats on 8.5x11
+      <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-2 sm:p-4 md:p-8 pb-12 print:bg-white print:text-black print:min-h-0 print:p-0">
+        
+        <div className="flex justify-between items-center mb-4 md:mb-6 border-b border-[#444] pb-3 md:pb-4 sticky top-0 bg-[#1E1E1E] z-10 pt-2 print:hidden">
           <button onClick={() => setView('library')} className="flex items-center text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2 px-1">
             ← Back
           </button>
-          <button onClick={() => handleEditRecipe(selectedRecipe)} className="bg-[#C53636] hover:bg-[#C95757] px-4 md:px-6 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base">
-            Edit
-          </button>
+          <div className="flex gap-2">
+            <button onClick={() => window.print()} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center">
+              📄 PDF
+            </button>
+            <button onClick={() => handleEditRecipe(selectedRecipe)} className="bg-[#C53636] hover:bg-[#C95757] px-4 md:px-6 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base">
+              Edit
+            </button>
+          </div>
         </div>
 
-        <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-3 md:p-6 mb-4 md:mb-6 shadow-lg flex flex-col md:flex-row gap-4 md:gap-6">
+        <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-3 md:p-6 mb-4 md:mb-6 shadow-lg flex flex-col md:flex-row gap-4 md:gap-6 print:bg-white print:border-none print:shadow-none print:p-0 print:mb-6 print:flex-row">
           {selectedRecipe.media_urls?.main_image && (
-            <div className="relative w-full md:w-1/3 h-56 md:h-auto rounded-lg overflow-hidden shadow-inner bg-[#1E1E1E] shrink-0">
-              <img src={selectedRecipe.media_urls.main_image} alt="Recipe" className="w-full h-full object-cover" />
+            // Swapped to aspect-square on mobile and object-contain so nothing cuts off
+            <div className="relative w-full aspect-square md:aspect-auto md:w-1/3 md:max-h-64 rounded-lg overflow-hidden shadow-inner bg-[#111] shrink-0 print:w-48 print:h-48 print:max-h-48 print:aspect-square print:bg-transparent">
+              <img src={selectedRecipe.media_urls.main_image} alt="Recipe" className="w-full h-full object-contain md:object-cover print:object-contain print:object-left-top" />
             </div>
           )}
           <div className="flex-1">
-            <h1 className="text-2xl md:text-3xl font-bold mb-2 leading-tight">{selectedRecipe.title}</h1>
-            <p className="text-gray-400 italic mb-4 text-base md:text-lg">{selectedRecipe.description}</p>
+            <h1 className="text-2xl md:text-3xl font-bold mb-2 leading-tight print:text-black">{selectedRecipe.title}</h1>
+            <p className="text-gray-400 italic mb-4 text-base md:text-lg print:text-gray-700">{selectedRecipe.description}</p>
             
             {selectedRecipe.categories && selectedRecipe.categories.length > 0 && (
               <div className="flex flex-wrap gap-2 mb-4">
                 {selectedRecipe.categories.map(cat => (
-                  <span key={cat} className="bg-[#1E1E1E] border border-[#555] px-2 py-1 rounded-md text-xs font-bold text-gray-400 uppercase tracking-wider">
+                  <span key={cat} className="bg-[#1E1E1E] border border-[#555] px-2 py-1 rounded-md text-xs font-bold text-gray-400 uppercase tracking-wider print:bg-gray-100 print:text-gray-800 print:border-gray-300">
                     {cat}
                   </span>
                 ))}
               </div>
             )}
 
-            <div className="flex flex-wrap gap-2 md:gap-4 text-xs md:text-sm text-gray-300 font-bold uppercase tracking-wider bg-[#1E1E1E] p-3 md:p-4 rounded-lg border border-[#444]">
-              <span className="bg-[#333] px-2 py-1 rounded">🍽 {selectedRecipe.servings} Servings</span>
-              <span className="bg-[#333] px-2 py-1 rounded">⏱ Prep: {selectedRecipe.prep_min}m</span>
-              <span className="bg-[#333] px-2 py-1 rounded">🔥 Cook: {selectedRecipe.cook_min}m</span>
+            <div className="flex flex-wrap gap-2 md:gap-4 text-xs md:text-sm text-gray-300 font-bold uppercase tracking-wider bg-[#1E1E1E] p-3 md:p-4 rounded-lg border border-[#444] print:bg-white print:border-gray-300 print:text-black print:p-0 print:border-none print:gap-6">
+              <span className="bg-[#333] px-2 py-1 rounded print:bg-transparent print:p-0">🍽 {selectedRecipe.servings} Servings</span>
+              <span className="bg-[#333] px-2 py-1 rounded print:bg-transparent print:p-0">⏱ Prep: {selectedRecipe.prep_min}m</span>
+              <span className="bg-[#333] px-2 py-1 rounded print:bg-transparent print:p-0">🔥 Cook: {selectedRecipe.cook_min}m</span>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6">
-          <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-4 md:p-6 md:col-span-1 shadow-lg">
-            <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide">Ingredients</h2>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 md:gap-6 print:block">
+          <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-4 md:p-6 md:col-span-1 shadow-lg print:bg-white print:border-none print:shadow-none print:p-0 print:mb-6">
+            <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide print:text-black print:border-gray-300">Ingredients</h2>
             <ul className="space-y-3">
               {selectedRecipe.ingredients?.length > 0 ? selectedRecipe.ingredients.map((ing, idx) => (
-                <li key={idx} className="flex flex-col border-b border-[#444] pb-2 last:border-0">
+                <li key={idx} className="flex flex-col border-b border-[#444] pb-2 last:border-0 print:border-gray-200">
                   <div className="flex items-start leading-tight">
-                    <span className="text-[#C53636] mr-2 font-bold text-lg">•</span>
-                    <span className="text-base md:text-lg pt-0.5">
-                      <strong className="text-[#C53636]">{ing.quantity} {ing.unit}</strong> {ing.name}
-                      {ing.notes && <span className="text-gray-500 text-sm ml-1 italic block sm:inline">({ing.notes})</span>}
+                    <span className="text-[#C53636] mr-2 font-bold text-lg print:text-black">•</span>
+                    <span className="text-base md:text-lg pt-0.5 print:text-black">
+                      <strong className="text-[#C53636] print:text-black">{ing.quantity} {ing.unit}</strong> {ing.name}
+                      {ing.notes && <span className="text-gray-500 text-sm ml-1 italic block sm:inline print:text-gray-600">({ing.notes})</span>}
                     </span>
                   </div>
                 </li>
@@ -438,16 +449,16 @@ export default function MamaDeeApp() {
             </ul>
           </div>
 
-          <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-4 md:p-6 md:col-span-2 shadow-lg">
-            <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide">Instructions</h2>
+          <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-4 md:p-6 md:col-span-2 shadow-lg print:bg-white print:border-none print:shadow-none print:p-0">
+            <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide print:text-black print:border-gray-300">Instructions</h2>
             <div className="space-y-6">
               {selectedRecipe.steps?.length > 0 ? selectedRecipe.steps.map((step, idx) => (
-                <div key={idx} className="flex flex-col md:flex-row gap-2 md:gap-4 border-b border-[#444] pb-5 last:border-0">
-                  <div className="font-bold text-xl md:text-2xl text-[#C53636] shrink-0">{idx + 1}.</div>
+                <div key={idx} className="flex gap-3 border-b border-[#444] pb-5 last:border-0 print:border-gray-200 print:break-inside-avoid">
+                  <div className="font-bold text-xl md:text-2xl text-[#C53636] shrink-0 print:text-black">{idx + 1}.</div>
                   <div className="flex-1 flex flex-col gap-3">
-                    <p className="text-base md:text-lg leading-relaxed text-gray-200">{step.text}</p>
+                    <p className="text-base md:text-lg leading-relaxed text-gray-200 print:text-black">{step.text}</p>
                     {step.audio_url && (
-                       <div className="bg-[#1E1E1E] p-2 rounded-lg border border-[#555] w-full mt-1">
+                       <div className="bg-[#1E1E1E] p-2 rounded-lg border border-[#555] w-full mt-1 print:hidden">
                          <span className="text-[10px] md:text-xs text-[#00A023] font-bold uppercase tracking-wider mb-1 block pl-1">Audio Note:</span>
                          <audio controls src={step.audio_url} className="w-full h-10 outline-none" />
                        </div>
