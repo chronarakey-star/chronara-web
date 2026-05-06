@@ -31,9 +31,6 @@ interface Recipe {
   steps: Step[];
   media_urls: {
     main_image?: string;
-    main_audio?: string;
-    main_video?: string;
-    gallery?: string[];
   };
 }
 
@@ -105,7 +102,7 @@ const AudioRecorder = ({ onUploadSuccess }: { onUploadSuccess: (url: string) => 
   return (
     <button
       onClick={(e) => { e.preventDefault(); isRecording ? stopRecording() : startRecording(); }}
-      className={`px-4 py-2 text-sm font-bold rounded-md transition-colors ${
+      className={`px-3 py-2 text-xs md:text-sm font-bold rounded-md transition-colors ${
         isRecording ? 'bg-red-600 text-white animate-pulse' : 'bg-[#333] hover:bg-[#444] text-gray-300 border border-[#555]'
       }`}
     >
@@ -205,10 +202,7 @@ export default function MamaDeeApp() {
   };
 
   const handleRemoveCategoryFromForm = (catToRemove: string) => {
-    setFormData(prev => ({
-      ...prev,
-      categories: prev.categories.filter(c => c !== catToRemove)
-    }));
+    setFormData(prev => ({ ...prev, categories: prev.categories.filter(c => c !== catToRemove) }));
   };
 
   const handleSaveRecipe = async () => {
@@ -388,7 +382,7 @@ export default function MamaDeeApp() {
   // ============================================================================
   if (view === 'cook' && selectedRecipe) {
     return (
-      <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-2 sm:p-4 md:p-8 pb-12">
+      <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-3 md:p-8 pb-12">
         <div className="flex justify-between items-center mb-4 md:mb-6 border-b border-[#444] pb-3 md:pb-4 sticky top-0 bg-[#1E1E1E] z-10 pt-2">
           <button onClick={() => setView('library')} className="flex items-center text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2 px-1">
             ← Back
@@ -400,7 +394,7 @@ export default function MamaDeeApp() {
 
         <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-3 md:p-6 mb-4 md:mb-6 shadow-lg flex flex-col md:flex-row gap-4 md:gap-6">
           {selectedRecipe.media_urls?.main_image && (
-            <div className="relative w-full md:w-1/3 h-48 md:h-auto rounded-lg overflow-hidden shadow-inner bg-[#1E1E1E] shrink-0">
+            <div className="relative w-full md:w-1/3 h-56 md:h-auto rounded-lg overflow-hidden shadow-inner bg-[#1E1E1E] shrink-0">
               <img src={selectedRecipe.media_urls.main_image} alt="Recipe" className="w-full h-full object-cover" />
             </div>
           )}
@@ -448,7 +442,7 @@ export default function MamaDeeApp() {
             <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide">Instructions</h2>
             <div className="space-y-6">
               {selectedRecipe.steps?.length > 0 ? selectedRecipe.steps.map((step, idx) => (
-                <div key={idx} className="flex gap-3 border-b border-[#444] pb-5 last:border-0">
+                <div key={idx} className="flex flex-col md:flex-row gap-2 md:gap-4 border-b border-[#444] pb-5 last:border-0">
                   <div className="font-bold text-xl md:text-2xl text-[#C53636] shrink-0">{idx + 1}.</div>
                   <div className="flex-1 flex flex-col gap-3">
                     <p className="text-base md:text-lg leading-relaxed text-gray-200">{step.text}</p>
