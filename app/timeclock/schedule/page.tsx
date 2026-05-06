@@ -13,15 +13,58 @@ interface Employee {
   last_name: string;
 }
 
-// Date Parsing Helper for Schedule Logic
-const parseShiftDateTime = (dateStr: string, timeStr: string) => {
+// --- TIMEZONE HELPERS ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone; // Fallback to browser time
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
+const getZonedDateStr = (utcDate: Date, timeZone: string) => {
+    try {
+        const localStr = utcDate.toLocaleString('en-US', { timeZone });
+        const localDate = new Date(localStr);
+        const yyyy = localDate.getFullYear();
+        const mm = String(localDate.getMonth() + 1).padStart(2, '0');
+        const dd = String(localDate.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+    } catch {
+        return utcDate.toISOString().split('T')[0];
+    }
+};
+
+const getZonedTime = (utcDate: Date, timeZone: string) => {
+  try { return new Date(utcDate.toLocaleString('en-US', { timeZone })); } 
+  catch { return new Date(utcDate.toLocaleString('en-US')); }
+};
+
+// Date Parsing Helper for Schedule Logic (Applies the Offset Rule calculation)
+const parseShiftDateTime = (dateStr: string, timeStr: string, timeZone: string) => {
+  if (!timeStr) return new Date();
   try {
-    const [time, modifier] = timeStr.split(" ");
-    let [hours, minutes] = time.split(":");
+    const match = timeStr.trim().match(/(\d+):(\d+)\s*(AM|PM)/i);
+    if (!match) return new Date();
+    let [ , hours, mins, ampm ] = match;
     let h = parseInt(hours, 10);
-    if (modifier === "PM" && h < 12) h += 12;
-    if (modifier === "AM" && h === 12) h = 0;
-    return new Date(`${dateStr}T${h.toString().padStart(2, '0')}:${minutes}:00`);
+    const m = parseInt(mins, 10);
+    if (ampm.toUpperCase() === "PM" && h < 12) h += 12;
+    if (ampm.toUpperCase() === "AM" && h === 12) h = 0;
+    
+    const [yyyy, month, day] = dateStr.split('-').map(Number);
+    const testLocal = new Date(yyyy, month - 1, day, h, m, 0);
+    
+    const zonedBase = getZonedTime(testLocal, timeZone);
+    const offsetMs = zonedBase.getTime() - testLocal.getTime();
+    return new Date(testLocal.getTime() - offsetMs); // Returns Absolute UTC Time of the Shift
   } catch {
     return new Date();
   }
@@ -36,8 +79,10 @@ export default function TimeClockSchedule() {
 
   const [themeColor, setThemeColor] = useState("#00A023");
   const [employee, setEmployee] = useState<Employee | null>(null);
+  const [myEmpIds, setMyEmpIds] = useState<string[]>([]); // ADD THIS LINE
   const [storeId, setStoreId] = useState<string>("");
   const [companyId, setCompanyId] = useState<string>(""); 
+  const [storeTimezone, setStoreTimezone] = useState<string>("America/Toronto");
 
   const [viewYear, setViewYear] = useState(new Date().getFullYear());
   const [viewMonth, setViewMonth] = useState(new Date().getMonth()); // 0-11
@@ -52,12 +97,10 @@ export default function TimeClockSchedule() {
   
   const loadScheduleData = async (comp_id: string, s_id: string) => {
     try {
-      const { data: emps } = await supabase
-        .from('employees')
-        .select('id, first_name, last_name')
-        .eq('company_id', comp_id)
-        .eq('store_id', s_id)
-        .eq('status', 'Active');
+      let empsQuery = supabase.from('employees').select('id, first_name, last_name').eq('company_id', comp_id).eq('status', 'Active');
+      if (s_id && s_id !== "ALL_STORES") empsQuery = empsQuery.eq('store_id', s_id);
+      
+      const { data: emps } = await empsQuery;
 
       const empMap: Record<string, string> = {};
       if (emps) {
@@ -68,27 +111,26 @@ export default function TimeClockSchedule() {
       const startDt = new Date(viewYear, viewMonth, 1);
       const endDt = new Date(viewYear, viewMonth + 1, 0);
       
-      const startStr = startDt.toISOString().split('T')[0];
-      const endStr = endDt.toISOString().split('T')[0];
+      // OFFSET RULE: Padded window
+      const paddedStartDt = new Date(startDt); paddedStartDt.setDate(paddedStartDt.getDate() - 3);
+      const paddedEndDt = new Date(endDt); paddedEndDt.setDate(paddedEndDt.getDate() + 3);
 
-      const { data: shifts } = await supabase
-        .from('schedules')
-        .select('*')
-        .eq('company_id', comp_id)
-        .eq('store_id', s_id)
-        .gte('date', startStr)
-        .lte('date', endStr);
+      const startStr = getZonedDateStr(paddedStartDt, storeTimezone);
+      const endStr = getZonedDateStr(paddedEndDt, storeTimezone);
+
+      let shiftsQuery = supabase.from('schedules').select('*').eq('company_id', comp_id).gte('date', startStr).lte('date', endStr);
+      if (s_id && s_id !== "ALL_STORES") shiftsQuery = shiftsQuery.eq('store_id', s_id);
       
+      const { data: shifts } = await shiftsQuery;
       setScheduleData(shifts || []);
 
-      const { data: punches } = await supabase
-        .from('time_punches')
-        .select('employee_id, clock_in')
-        .eq('company_id', comp_id)
-        .eq('store_id', s_id)
-        .gte('clock_in', startStr)
-        .lte('clock_in', `${endStr}T23:59:59`);
+      const startUtcIso = paddedStartDt.toISOString();
+      const endUtcIso = paddedEndDt.toISOString();
 
+      let punchesQuery = supabase.from('time_punches').select('employee_id, clock_in').eq('company_id', comp_id).gte('clock_in', startUtcIso).lte('clock_in', endUtcIso);
+      if (s_id && s_id !== "ALL_STORES") punchesQuery = punchesQuery.eq('store_id', s_id);
+      
+      const { data: punches } = await punchesQuery;
       setSchedulePunches(punches || []);
     } catch (err) {
       console.error("Error loading schedule:", err);
@@ -131,14 +173,29 @@ export default function TimeClockSchedule() {
           setCompanyId(currentCompanyId); 
         }
 
+        // --- NEW: Remove limit(1) and store ALL linked profile IDs ---
         const { data: empData } = await supabase
           .from('employees')
           .select('id, first_name, last_name') 
-          .eq('user_id', user.id)
-          .limit(1);
+          .eq('user_id', user.id);
 
         if (empData && empData.length > 0) {
           setEmployee(empData[0]);
+          setMyEmpIds(empData.map(e => e.id)); 
+        }
+        // -------------------------------------------------------------
+
+        // --- FETCH STORE TIMEZONE ---
+        let fetchedTz = "America/Toronto";
+        if (currentStoreId && currentStoreId !== "ALL_STORES") {
+            const { data: storeInfo } = await supabase.from('stores').select('province').eq('id', currentStoreId).single();
+            if (storeInfo && storeInfo.province) {
+                fetchedTz = getStoreTimezone(storeInfo.province, false);
+                setStoreTimezone(fetchedTz);
+            }
+        } else if (currentStoreId === "ALL_STORES") {
+            fetchedTz = getStoreTimezone('', true);
+            setStoreTimezone(fetchedTz);
         }
 
         if (currentCompanyId && currentStoreId) {
@@ -164,18 +221,10 @@ export default function TimeClockSchedule() {
   // ============================================================================
   // 4. UI HELPERS (Schedule Styling)
   // ============================================================================
-  // ============================================================================
-  // 4. UI HELPERS (Schedule Styling)
-  // ============================================================================
   const getShiftStyle = (shift: any) => {
-    const isMine = shift.employee_id === employee?.id;
-
-    // PRIVACY SHIELD: If this is a coworker's shift, instantly return grey. No snitching!
-    if (!isMine) {
-      return { bg: "#333333", fg: "#aaaaaa" };
-    }
-
-    // --- EVERYTHING BELOW THIS LINE ONLY APPLIES TO THE LOGGED-IN USER ---
+    const isMine = myEmpIds.includes(shift.employee_id);
+    const defaultBg = isMine ? themeColor : "#333333";
+    const defaultFg = isMine ? "white" : "#aaaaaa";
     
     // Check for Excused
     if (String(shift.is_excused) === "1" || String(shift.is_excused).toLowerCase() === "true") {
@@ -183,29 +232,41 @@ export default function TimeClockSchedule() {
     }
 
     try {
-      const shiftStartDt = parseShiftDateTime(shift.date, shift.start_time);
-      const shiftEndDt = parseShiftDateTime(shift.date, shift.end_time);
+      const shiftStartDt = parseShiftDateTime(shift.date, shift.start_time, storeTimezone);
+      const shiftEndDt = parseShiftDateTime(shift.date, shift.end_time, storeTimezone);
+      
+      // Fix for overnight shifts (e.g. 10PM to 2AM)
+      if (shiftEndDt.getTime() < shiftStartDt.getTime()) {
+         shiftEndDt.setDate(shiftEndDt.getDate() + 1);
+      }
       
       const empPunches = schedulePunches
-        .filter(p => p.employee_id === shift.employee_id && String(p.clock_in).startsWith(shift.date))
-        .sort((a, b) => new Date(a.clock_in).getTime() - new Date(b.clock_in).getTime());
+        .map(p => {
+            const safeClockIn = String(p.clock_in).replace("Z", "+00:00");
+            const clockInUtc = new Date(safeClockIn);
+            const localDateStr = getZonedDateStr(clockInUtc, storeTimezone);
+            return { ...p, clockInUtc, localDateStr };
+        })
+        .filter(p => p.employee_id === shift.employee_id && p.localDateStr === shift.date)
+        .sort((a, b) => a.clockInUtc.getTime() - b.clockInUtc.getTime());
 
       if (empPunches.length > 0) {
-        const firstPunchDt = new Date(empPunches[0].clock_in);
+        const firstPunchDt = empPunches[0].clockInUtc; // Absolute UTC punch time
         if (firstPunchDt.getTime() > shiftStartDt.getTime() + (10 * 60000)) {
           return { bg: "#E0A800", fg: "white" }; // Late
         } else {
           return { bg: "#00A023", fg: "white" }; // On Time
         }
       } else {
-        if (new Date().getTime() > shiftEndDt.getTime()) {
+        const nowUtc = new Date();
+        if (nowUtc.getTime() > shiftEndDt.getTime()) {
           return { bg: "#C92C2C", fg: "white" }; // Missed
         }
       }
     } catch (e) {}
 
-    // Default future shift style (Theme Color)
-    return { bg: themeColor, fg: "white" };
+    // Default future shift style (Grey for coworkers, Theme Color for me)
+    return { bg: defaultBg, fg: defaultFg };
   };
 
   const renderCalendar = () => {
@@ -223,18 +284,24 @@ export default function TimeClockSchedule() {
       
       const dayShifts = scheduleData
         .filter(s => s.date === dateStr)
-        .sort((a, b) => (a.employee_id === employee?.id ? -1 : 1));
+        .sort((a, b) => {
+          // --- NEW: Prioritize the logged-in user to the top ---
+          const aIsMine = myEmpIds.includes(a.employee_id);
+          const bIsMine = myEmpIds.includes(b.employee_id);
+          if (aIsMine && !bIsMine) return -1;
+          if (!aIsMine && bIsMine) return 1;
+          return 0;
+        });
 
       days.push(
         <div key={`day-${d}`} className="bg-[#2a2a2a] min-h-[120px] border border-gray-800 flex flex-col rounded-sm p-1">
           <div className="text-left text-sm font-bold mb-1 ml-1" style={{ color: themeColor }}>
             {d}
           </div>
-          {/* Removed fixed overflow scrolling here so the parent row expands naturally */}
           <div className="space-y-1 pb-1">
             {dayShifts.map((s, idx) => {
               const style = getShiftStyle(s);
-              const isMine = s.employee_id === employee?.id;
+              const isMine = myEmpIds.includes(s.employee_id);
               const name = scheduleEmployees[s.employee_id] || "Unknown";
               return (
                 <div key={idx} className="px-2 py-1 rounded text-[10px] sm:text-xs font-semibold" style={{ backgroundColor: style.bg, color: style.fg }}>

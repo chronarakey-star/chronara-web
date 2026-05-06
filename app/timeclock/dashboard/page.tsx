@@ -43,10 +43,35 @@ const formatDuration = (totalSeconds: number) => {
   return `Duration: ${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
 };
 
-const getLocalIsoString = () => {
-  const now = new Date();
-  const tzoffset = now.getTimezoneOffset() * 60000;
-  return new Date(now.getTime() - tzoffset).toISOString().slice(0, -1);
+// --- TIMEZONE HELPERS ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone; // Fallback to browser time
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
+const getZonedDateStr = (utcDate: Date, timeZone: string) => {
+    const formatter = new Intl.DateTimeFormat('en-CA', {
+        timeZone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit'
+    });
+    return formatter.format(utcDate);
+};
+
+const getZonedTime = (utcDate: Date, timeZone: string) => {
+  try { return new Date(utcDate.toLocaleString('en-US', { timeZone })); } 
+  catch { return new Date(utcDate.toLocaleString('en-US')); }
 };
 
 // ============================================================================
@@ -62,8 +87,9 @@ export default function TimeClockDashboard() {
   const [themeColor, setThemeColor] = useState("#00A023");
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
-  const [employeeData, setEmployeeData] = useState<Employee[]>([]); // <--- NEW: Stores all linked profiles
+  const [employeeData, setEmployeeData] = useState<Employee[]>([]); 
   const [storeId, setStoreId] = useState<string>("");
+  const [storeTimezone, setStoreTimezone] = useState<string>("America/Toronto");
   const [companyId, setCompanyId] = useState<string>(""); 
 
   const [status, setStatus] = useState<"CLOCKED_OUT" | "CLOCKED_IN" | "ON_BREAK">("CLOCKED_OUT");
@@ -101,9 +127,9 @@ export default function TimeClockDashboard() {
   // ============================================================================
   // 3. DATA FETCHING & MATH
   // ============================================================================
-  const fetchTimeOffs = async (empIds: string[]) => {
+  const fetchTimeOffs = async (empIds: string[], tz: string) => {
     try {
-      const todayStr = new Date().toISOString().split('T')[0];
+      const todayStr = getZonedDateStr(new Date(), tz);
       const { data } = await supabase
         .from('time_off_requests')
         .select('*')
@@ -118,10 +144,11 @@ export default function TimeClockDashboard() {
     }
   };
 
-  const loadPerformanceStats = async (empIds: string[], currentCompanyId: string, currentStoreId: string) => {
+  const loadPerformanceStats = async (empIds: string[], currentCompanyId: string, currentStoreId: string, tz: string) => {
     try {
-      const now = new Date();
-      const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+      const utcNow = new Date();
+      const zonedNow = getZonedTime(utcNow, tz);
+      const today = new Date(zonedNow.getFullYear(), zonedNow.getMonth(), zonedNow.getDate());
       
       let payPeriodStart = new Date(today);
       payPeriodStart.setDate(today.getDate() - today.getDay()); 
@@ -182,38 +209,33 @@ export default function TimeClockDashboard() {
 
       const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
       const endOfMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0);
-      
-      const formatDateStr = (d: Date) => {
-          const tzoffset = d.getTimezoneOffset() * 60000;
-          return new Date(d.getTime() - tzoffset).toISOString().split('T')[0];
+
+      const convertToUtcBoundary = (d: Date, endOfDay: boolean) => {
+        const boundary = new Date(d);
+        if (endOfDay) boundary.setHours(23, 59, 59, 999);
+        const testDate = new Date();
+        const zoned = getZonedTime(testDate, tz);
+        const offset = zoned.getTime() - testDate.getTime();
+        return new Date(boundary.getTime() - offset).toISOString();
       };
 
-      const periodStartStr = formatDateStr(payPeriodStart) + "T00:00:00";
-      const periodEndStr = formatDateStr(payPeriodEnd) + "T23:59:59";
-      const monthStartStr = formatDateStr(startOfMonth) + "T00:00:00";
-      const monthEndStr = formatDateStr(endOfMonth) + "T23:59:59";
+      const periodStartIso = convertToUtcBoundary(payPeriodStart, false);
+      const periodEndIso = convertToUtcBoundary(payPeriodEnd, true);
+      const monthStartIso = convertToUtcBoundary(startOfMonth, false);
+      const monthEndIso = convertToUtcBoundary(endOfMonth, true);
 
-      // --- ISOLATE MATH BY STORE ---
-      let punchQuery = supabase.from('time_punches')
-          .select('id, clock_in, clock_out, employee_id')
-          .in('employee_id', empIds);
-      
-      if (currentStoreId && currentStoreId !== "ALL_STORES") {
-          punchQuery = punchQuery.eq('store_id', currentStoreId);
-      }
+      let punchQuery = supabase.from('time_punches').select('id, clock_in, clock_out, employee_id').in('employee_id', empIds);
+      if (currentStoreId && currentStoreId !== "ALL_STORES") punchQuery = punchQuery.eq('store_id', currentStoreId);
           
       const { data: allPunches } = await punchQuery;
           
       const punchIds = allPunches?.map(p => p.id) || [];
       const { data: allBreaks } = await supabase.from('time_punch_breaks')
           .select('punch_id, break_start, break_end, break_type')
-          .in('punch_id', punchIds)
-          .eq('break_type', 'Unpaid');
+          .in('punch_id', punchIds).eq('break_type', 'Unpaid');
 
       let schedQuery = supabase.from('schedules').select('employee_id, date').in('employee_id', empIds);
-      if (currentStoreId && currentStoreId !== "ALL_STORES") {
-          schedQuery = schedQuery.eq('store_id', currentStoreId);
-      }
+      if (currentStoreId && currentStoreId !== "ALL_STORES") schedQuery = schedQuery.eq('store_id', currentStoreId);
       const { data: schedData } = await schedQuery;
       const schedSet = new Set(schedData?.map(s => `${s.employee_id}_${s.date}`));
 
@@ -236,27 +258,21 @@ export default function TimeClockDashboard() {
                   try {
                       let tIn = new Date(p.clock_in);
                       let tOut = new Date(p.clock_out);
-                      
                       const grossSec = (tOut.getTime() - tIn.getTime()) / 1000.0;
                       
                       const pBreaks = (breaks || []).filter(b => b.punch_id === p.id && b.break_end);
                       let breakSec = 0;
                       pBreaks.forEach(b => {
                           try {
-                              let bS = new Date(b.break_start);
-                              let bE = new Date(b.break_end);
-                              breakSec += (bE.getTime() - bS.getTime()) / 1000.0;
+                              breakSec += (new Date(b.break_end).getTime() - new Date(b.break_start).getTime()) / 1000.0;
                           } catch (e) {}
                       });
                       
                       let netHours = Math.max(0, grossSec - breakSec) / 3600.0;
                       
                       if (minPayActive && netHours > 0 && netHours < minPayHours) {
-                          const tzoffset = tIn.getTimezoneOffset() * 60000;
-                          const localDateStr = new Date(tIn.getTime() - tzoffset).toISOString().split('T')[0];
-                          if (schedSet.has(`${p.employee_id}_${localDateStr}`)) {
-                              netHours = minPayHours;
-                          }
+                          const localDateStr = getZonedDateStr(tIn, tz);
+                          if (schedSet.has(`${p.employee_id}_${localDateStr}`)) netHours = minPayHours;
                       }
                       
                       totalSec += netHours * 3600.0;
@@ -266,8 +282,8 @@ export default function TimeClockDashboard() {
           return totalSec / 3600.0;
       };
 
-      const periodPunches = (allPunches || []).filter(p => p.clock_in >= periodStartStr && p.clock_in <= periodEndStr);
-      const monthPunches = (allPunches || []).filter(p => p.clock_in >= monthStartStr && p.clock_in <= monthEndStr);
+      const periodPunches = (allPunches || []).filter(p => p.clock_in >= periodStartIso && p.clock_in <= periodEndIso);
+      const monthPunches = (allPunches || []).filter(p => p.clock_in >= monthStartIso && p.clock_in <= monthEndIso);
       
       const periodHrs = calcNetHours(periodPunches, allBreaks || []);
       const monthHrs = calcNetHours(monthPunches, allBreaks || []);
@@ -278,21 +294,22 @@ export default function TimeClockDashboard() {
       for (let i = 14; i >= 0; i--) {
           const d = new Date(today);
           d.setDate(d.getDate() - i);
-          dailyHours[formatDateStr(d)] = 0.0;
+          const lookupStr = d.toISOString().split('T')[0];
+          dailyHours[lookupStr] = 0.0;
       }
 
       Object.keys(dailyHours).forEach(dStr => {
-          const dayPunches = (allPunches || []).filter(p => p.clock_in.startsWith(dStr));
+          const dayPunches = (allPunches || []).filter(p => getZonedDateStr(new Date(p.clock_in), tz) === dStr);
           dailyHours[dStr] = calcNetHours(dayPunches, allBreaks || []);
       });
 
       let streak = 0;
       let checkDate = new Date(today);
-      if (dailyHours[formatDateStr(checkDate)] === 0) {
+      if (dailyHours[checkDate.toISOString().split('T')[0]] === 0) {
           checkDate.setDate(checkDate.getDate() - 1);
       }
       
-      while (dailyHours[formatDateStr(checkDate)] > 0) {
+      while (dailyHours[checkDate.toISOString().split('T')[0]] > 0) {
           streak++;
           checkDate.setDate(checkDate.getDate() - 1);
       }
@@ -300,11 +317,13 @@ export default function TimeClockDashboard() {
       let nextShiftStr = "No upcoming shifts";
       const tomorrow = new Date(today);
       tomorrow.setDate(tomorrow.getDate() + 1);
+      const todayStr = today.toISOString().split('T')[0];
+      const tomorrowStr = tomorrow.toISOString().split('T')[0];
       
       let nextSchedQuery = supabase.from('schedules')
           .select('date, start_time, end_time')
           .in('employee_id', empIds)
-          .gte('date', formatDateStr(today))
+          .gte('date', todayStr)
           .order('date', { ascending: true })
           .order('start_time', { ascending: true });
           
@@ -315,9 +334,8 @@ export default function TimeClockDashboard() {
 
       if (nextScheds && nextScheds.length > 0) {
           let validShift = null;
-          const todayStr = formatDateStr(today);
-          const hasWorkedToday = (allPunches || []).some(p => p.clock_in.startsWith(todayStr));
-          const nowMs = now.getTime();
+          const hasWorkedToday = (allPunches || []).some(p => getZonedDateStr(new Date(p.clock_in), tz) === todayStr);
+          const nowMs = zonedNow.getTime();
 
           const parseTime = (dateStr: string, timeStr: string) => {
               if (!timeStr) return null;
@@ -337,7 +355,6 @@ export default function TimeClockDashboard() {
           for (const s of nextScheds) {
               if (s.date === todayStr) {
                   if (hasWorkedToday) continue;
-                  
                   if (s.end_time) {
                       const endMs = parseTime(s.date, s.end_time);
                       if (endMs && nowMs > endMs) continue;
@@ -349,13 +366,13 @@ export default function TimeClockDashboard() {
 
           if (validShift) {
               const s = validShift;
-              const shiftDate = new Date(s.date + 'T00:00:00');
+              const shiftDate = new Date(s.date + 'T12:00:00'); 
               const monthName = shiftDate.toLocaleString('default', { month: 'short' });
               const dayNum = shiftDate.getDate();
               
               if (s.date === todayStr) {
                   nextShiftStr = `Today\n${s.start_time} - ${s.end_time || '?'}`;
-              } else if (s.date === formatDateStr(tomorrow)) {
+              } else if (s.date === tomorrowStr) {
                   nextShiftStr = `Tomorrow\n${s.start_time} - ${s.end_time || '?'}`;
               } else {
                   nextShiftStr = `${shiftDate.toLocaleDateString('en-US', { weekday: 'short' })}, ${monthName} ${dayNum}\n${s.start_time} - ${s.end_time || '?'}`;
@@ -381,15 +398,10 @@ export default function TimeClockDashboard() {
     }
   };
 
-  const refreshStatus = async (empIds: string[], currentCompanyId: string, currentStoreId: string) => {
+  const refreshStatus = async (empIds: string[], currentCompanyId: string, currentStoreId: string, tz: string) => {
     try {
-      let punchQ = supabase.from('time_punches')
-        .select('*')
-        .in('employee_id', empIds);
-        
-      if (currentStoreId && currentStoreId !== "ALL_STORES") {
-          punchQ = punchQ.eq('store_id', currentStoreId);
-      }
+      let punchQ = supabase.from('time_punches').select('*').in('employee_id', empIds);
+      if (currentStoreId && currentStoreId !== "ALL_STORES") punchQ = punchQ.eq('store_id', currentStoreId);
       
       const { data: punches } = await punchQ.order('clock_in', { ascending: false }).limit(1);
 
@@ -399,7 +411,6 @@ export default function TimeClockDashboard() {
           
           let autoClockedOut = false;
           
-          // --- AUTO CLOCK OUT LOGIC ---
           try {
             const clockInDt = new Date(punch.clock_in);
             const activeStoreId = punch.store_id || currentStoreId;
@@ -408,25 +419,29 @@ export default function TimeClockDashboard() {
               .eq('store_id', activeStoreId).limit(1);
 
             const s = settingsData?.[0];
-            const autoOutEnabled = s?.auto_clock_out === 1 || s?.auto_clock_out === true || String(s?.auto_clock_out).toLowerCase() === "true" || String(s?.auto_clock_out).toLowerCase() === "1";
+            const autoOutEnabled = s?.auto_clock_out === 1 || String(s?.auto_clock_out).toLowerCase() === "true";
             const bufferMins = parseInt(s?.auto_clock_out_mins as string, 10) || 0;
 
             if (autoOutEnabled) {
-              const tzoffset = clockInDt.getTimezoneOffset() * 60000;
-              const dateStr = new Date(clockInDt.getTime() - tzoffset).toISOString().split('T')[0];
+              const dateStr = getZonedDateStr(clockInDt, tz);
 
-              let schedQ = supabase.from('schedules')
-                  .select('end_time')
-                  .in('employee_id', empIds)
-                  .eq('date', dateStr);
-              if (activeStoreId && activeStoreId !== "ALL_STORES") {
-                  schedQ = schedQ.eq('store_id', activeStoreId);
-              }
-              const { data: schedData } = await schedQ.limit(1);
+              // OFFSET RULE: Padded window
+              const yesterday = new Date(clockInDt); yesterday.setDate(clockInDt.getDate() - 1);
+              const tomorrow = new Date(clockInDt); tomorrow.setDate(clockInDt.getDate() + 1);
+
+              let schedQ = supabase.from('schedules').select('date, end_time').in('employee_id', empIds)
+                .gte('date', getZonedDateStr(yesterday, tz))
+                .lte('date', getZonedDateStr(tomorrow, tz));
               
-              const shift = schedData?.[0];
+              if (activeStoreId && activeStoreId !== "ALL_STORES") schedQ = schedQ.eq('store_id', activeStoreId);
+              
+              const { data: schedData } = await schedQ;
+              
+              // Bucket locally in memory
+              const shift = (schedData || []).find(s => s.date === dateStr);
+              
               let autoClockOutTime: Date | null = null;
-              const now = new Date();
+              const nowUtc = new Date();
 
               if (shift && shift.end_time) {
                   const match = shift.end_time.trim().match(/(\d+):(\d+)\s*(AM|PM)/i);
@@ -437,43 +452,34 @@ export default function TimeClockDashboard() {
                       if (ampm.toUpperCase() === "PM" && h < 12) h += 12;
                       if (ampm.toUpperCase() === "AM" && h === 12) h = 0;
                       
-                      const shiftEndDt = new Date(clockInDt);
-                      shiftEndDt.setHours(h, m, 0, 0);
+                      const shiftEndStr = `${dateStr}T${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:00`;
+                      const testLocal = new Date(shiftEndStr);
+                      const zonedBase = getZonedTime(testLocal, tz);
+                      const offsetMs = zonedBase.getTime() - testLocal.getTime();
+                      const shiftEndUtc = new Date(testLocal.getTime() - offsetMs);
 
-                      if (shiftEndDt < clockInDt) {
-                          shiftEndDt.setDate(shiftEndDt.getDate() + 1);
+                      if (shiftEndUtc < clockInDt) {
+                          shiftEndUtc.setDate(shiftEndUtc.getDate() + 1);
                       }
 
-                      const bufferDt = new Date(shiftEndDt.getTime() + bufferMins * 60000);
-                      if (now >= bufferDt) {
-                          autoClockOutTime = shiftEndDt;
-                      }
+                      const bufferDt = new Date(shiftEndUtc.getTime() + bufferMins * 60000);
+                      if (nowUtc >= bufferDt) autoClockOutTime = shiftEndUtc;
                   }
               } 
               
               if (!autoClockOutTime) {
-                  const maxDuration = new Date(clockInDt.getTime() + 14 * 3600000); // 14 hours fallback
-                  if (now >= maxDuration) {
-                      autoClockOutTime = maxDuration;
-                  }
+                  const maxDuration = new Date(clockInDt.getTime() + 14 * 3600000); 
+                  if (nowUtc >= maxDuration) autoClockOutTime = maxDuration;
               }
 
               if (autoClockOutTime) {
-                  const tzoffset2 = autoClockOutTime.getTimezoneOffset() * 60000;
-                  const outIso = new Date(autoClockOutTime.getTime() - tzoffset2).toISOString().slice(0, -1);
-
+                  const outIso = autoClockOutTime.toISOString();
                   await supabase.from('time_punches')
-                      .update({ 
-                          clock_out: outIso, 
-                          status: 'Pending Edit', 
-                          req_notes: 'SYSTEM: Auto-Clocked Out (Forgot to punch)' 
-                      })
+                      .update({ clock_out: outIso, status: 'Pending Edit', req_notes: 'SYSTEM: Auto-Clocked Out (Forgot to punch)' })
                       .eq('id', punch.id);
-                  
                   await supabase.from('time_punch_breaks')
                       .update({ break_end: outIso })
-                      .eq('punch_id', punch.id)
-                      .or('break_end.is.null,break_end.eq.""');
+                      .eq('punch_id', punch.id).or('break_end.is.null,break_end.eq.""');
                   
                   autoClockedOut = true;
               }
@@ -481,7 +487,6 @@ export default function TimeClockDashboard() {
           } catch (err) {
             console.error("Auto clock out check error:", err);
           }
-          // --- END AUTO CLOCK OUT LOGIC ---
 
           if (autoClockedOut) {
             setStatus("CLOCKED_OUT");
@@ -493,13 +498,7 @@ export default function TimeClockDashboard() {
             setActivePunchId(punch.id);
             setActivePunchTime(new Date(punch.clock_in));
 
-            const { data: breaks } = await supabase
-              .from('time_punch_breaks')
-              .select('*')
-              .eq('punch_id', punch.id)
-              .order('break_start', { ascending: false })
-              .limit(1);
-
+            const { data: breaks } = await supabase.from('time_punch_breaks').select('*').eq('punch_id', punch.id).order('break_start', { ascending: false }).limit(1);
             if (breaks && breaks.length > 0 && !breaks[0].break_end) {
               setActiveBreakId(breaks[0].id);
               setActiveBreakTime(new Date(breaks[0].break_start));
@@ -521,8 +520,8 @@ export default function TimeClockDashboard() {
         setStatus("CLOCKED_OUT");
       }
 
-      await loadPerformanceStats(empIds, currentCompanyId, currentStoreId);
-      await fetchTimeOffs(empIds);
+      await loadPerformanceStats(empIds, currentCompanyId, currentStoreId, tz);
+      await fetchTimeOffs(empIds, tz);
     } catch (err) {
       console.error("Error refreshing status:", err);
     }
@@ -552,11 +551,7 @@ export default function TimeClockDashboard() {
       }
 
       try {
-        const { data: companies } = await supabase
-          .from('companies')
-          .select('id')
-          .or(`email.eq.${session.user.email},owner_email.eq.${session.user.email}`)
-          .limit(1);
+        const { data: companies } = await supabase.from('companies').select('id').or(`email.eq.${session.user.email},owner_email.eq.${session.user.email}`).limit(1);
 
         let activeCompanyId = "";
         if (companies && companies.length > 0) {
@@ -564,10 +559,20 @@ export default function TimeClockDashboard() {
           setCompanyId(activeCompanyId); 
         }
 
-        const { data: empData } = await supabase
-          .from('employees')
-          .select('id, first_name, last_name, company_id, store_id') 
-          .eq('user_id', user.id);
+        // --- FETCH STORE TIMEZONE ---
+        let fetchedTz = "America/Toronto";
+        if (cachedStore && cachedStore !== "ALL_STORES") {
+            const { data: storeInfo } = await supabase.from('stores').select('province').eq('id', cachedStore).single();
+            if (storeInfo && storeInfo.province) {
+                fetchedTz = getStoreTimezone(storeInfo.province, false);
+                setStoreTimezone(fetchedTz);
+            }
+        } else if (cachedStore === "ALL_STORES") {
+            fetchedTz = getStoreTimezone('', true);
+            setStoreTimezone(fetchedTz);
+        }
+
+        const { data: empData } = await supabase.from('employees').select('id, first_name, last_name, company_id, store_id').eq('user_id', user.id);
 
         if (empData && empData.length > 0) {
           setEmployeeData(empData);
@@ -575,23 +580,15 @@ export default function TimeClockDashboard() {
           setEmployee(targetEmp);
           
           const empIds = empData.map(e => e.id);
-          await refreshStatus(empIds, activeCompanyId, cachedStore);
+          await refreshStatus(empIds, activeCompanyId, cachedStore, fetchedTz);
         }
 
-        // --- FETCH AUTO LOGOUT SETTINGS ---
         if (cachedStore) {
-          const { data: settingsData } = await supabase
-            .from('store_time_clock_settings')
-            .select('*')
-            .eq('store_id', cachedStore)
-            .limit(1);
-            
+          const { data: settingsData } = await supabase.from('store_time_clock_settings').select('*').eq('store_id', cachedStore).limit(1);
           if (settingsData && settingsData.length > 0) {
             const s = settingsData[0];
             const autoOut = s.auto_logout || s.auto_signout || s.enforce_auto_logout;
-            if (autoOut === 1 || autoOut === true || String(autoOut).toLowerCase() === "true" || String(autoOut).toLowerCase() === "1") {
-              setAutoLogoutEnabled(true);
-            }
+            if (autoOut === 1 || String(autoOut).toLowerCase() === "true") setAutoLogoutEnabled(true);
           }
         }
       } catch (err) {
@@ -626,10 +623,10 @@ export default function TimeClockDashboard() {
     if (!employeeData || employeeData.length === 0) return;
     const syncTimer = setInterval(() => {
       const empIds = employeeData.map(e => e.id);
-      refreshStatus(empIds, companyId, storeId);
+      refreshStatus(empIds, companyId, storeId, storeTimezone);
     }, 10000);
     return () => clearInterval(syncTimer);
-  }, [employeeData, companyId, storeId]);
+  }, [employeeData, companyId, storeId, storeTimezone]);
 
   // ============================================================================
   // AUTO-LOGOUT INACTIVITY TRACKER
@@ -668,41 +665,40 @@ export default function TimeClockDashboard() {
     }
     
     try {
-      // --- PREVENT EARLY CLOCK IN & ROUNDING LOGIC ---
-      const { data: settingsData } = await supabase
-        .from('store_time_clock_settings')
+      const { data: settingsData } = await supabase.from('store_time_clock_settings')
         .select('enforce_schedule, early_clock_in_mins, round_time_punches, rounding_increment_mins, clock_in_message')
-        .eq('store_id', storeId)
-        .limit(1);
+        .eq('store_id', storeId).limit(1);
 
       const settings = settingsData?.[0];
-      const enforce = settings?.enforce_schedule === 1 || settings?.enforce_schedule === true || String(settings?.enforce_schedule).toLowerCase() === "true" || String(settings?.enforce_schedule).toLowerCase() === "1";
+      const enforce = settings?.enforce_schedule === 1 || String(settings?.enforce_schedule).toLowerCase() === "true";
       const earlyMins = settings?.early_clock_in_mins ? parseInt(settings.early_clock_in_mins as string, 10) : 10;
 
       let appliedRoundingMins = 0;
-      const isRounded = settings?.round_time_punches === 1 || settings?.round_time_punches === true || String(settings?.round_time_punches).toLowerCase() === "true" || String(settings?.round_time_punches).toLowerCase() === "1";
+      const isRounded = settings?.round_time_punches === 1 || String(settings?.round_time_punches).toLowerCase() === "true";
       if (isRounded && settings?.rounding_increment_mins) {
         appliedRoundingMins = parseInt(settings.rounding_increment_mins as string, 10) || 0;
       }
 
       if (enforce) {
-        const now = new Date();
-        const tzoffset = now.getTimezoneOffset() * 60000;
-        const todayStr = new Date(now.getTime() - tzoffset).toISOString().split('T')[0];
+        const utcNow = new Date();
+        const zonedNow = getZonedTime(utcNow, storeTimezone);
+        const todayStr = getZonedDateStr(utcNow, storeTimezone);
 
-        const { data: shifts } = await supabase
-          .from('schedules')
-          .select('start_time, end_time')
+        // OFFSET RULE: Padded window
+        const yesterday = new Date(utcNow); yesterday.setDate(utcNow.getDate() - 1);
+        const tomorrow = new Date(utcNow); tomorrow.setDate(utcNow.getDate() + 1);
+
+        const { data: schedData } = await supabase.from('schedules').select('date, start_time, end_time')
           .eq('employee_id', employee.id)
-          .eq('date', todayStr)
-          .order('start_time', { ascending: true });
+          .gte('date', getZonedDateStr(yesterday, storeTimezone))
+          .lte('date', getZonedDateStr(tomorrow, storeTimezone));
+
+        // Bucket locally in memory
+        const shifts = (schedData || []).filter(s => s.date === todayStr).sort((a, b) => (a.start_time || '').localeCompare(b.start_time || ''));
 
         if (!shifts || shifts.length === 0) {
           setFeedbackModal({
-            type: "error",
-            title: "Not Scheduled",
-            message: "You are not scheduled to work today.",
-            subMessage: "Please speak with a manager to clock in."
+            type: "error", title: "Not Scheduled", message: "You are not scheduled to work today.", subMessage: "Please speak with a manager to clock in."
           });
           return;
         }
@@ -728,27 +724,23 @@ export default function TimeClockDashboard() {
         for (const s of shifts) {
           if (!s.start_time) continue;
           
-          const shiftStartDt = parseTimeStr(s.start_time, now);
+          const shiftStartDt = parseTimeStr(s.start_time, zonedNow);
           if (!shiftStartDt) continue;
 
           const earliestAllowed = new Date(shiftStartDt.getTime() - (earlyMins * 60000));
-          let shiftEndDt = parseTimeStr(s.end_time || "", now);
+          let shiftEndDt = parseTimeStr(s.end_time || "", zonedNow);
           
           if (shiftEndDt) {
-            if (shiftEndDt < shiftStartDt) {
-              shiftEndDt.setDate(shiftEndDt.getDate() + 1);
-            }
+            if (shiftEndDt < shiftStartDt) shiftEndDt.setDate(shiftEndDt.getDate() + 1);
           } else {
-            shiftEndDt = new Date(shiftStartDt.getTime() + (12 * 3600000)); // Fallback +12 hours
+            shiftEndDt = new Date(shiftStartDt.getTime() + (12 * 3600000)); 
           }
 
-          if (now >= earliestAllowed && now <= shiftEndDt) {
+          if (zonedNow >= earliestAllowed && zonedNow <= shiftEndDt) {
             allowed = true;
             break;
-          } else if (now < earliestAllowed) {
-            if (!nextShiftDt || shiftStartDt < nextShiftDt) {
-              nextShiftDt = shiftStartDt;
-            }
+          } else if (zonedNow < earliestAllowed) {
+            if (!nextShiftDt || shiftStartDt < nextShiftDt) nextShiftDt = shiftStartDt;
           }
         }
 
@@ -756,17 +748,11 @@ export default function TimeClockDashboard() {
           if (nextShiftDt) {
             const friendlyTime = nextShiftDt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
             setFeedbackModal({
-                type: "error",
-                title: "Too Early",
-                message: `You are scheduled at ${friendlyTime}.`,
-                subMessage: `You cannot clock in more than ${earlyMins} minutes early.`
+                type: "error", title: "Too Early", message: `You are scheduled at ${friendlyTime}.`, subMessage: `You cannot clock in more than ${earlyMins} minutes early.`
             });
           } else {
             setFeedbackModal({
-                type: "error",
-                title: "Shift Missed",
-                message: "You do not have an applicable shift right now.",
-                subMessage: "Your scheduled time has already passed."
+                type: "error", title: "Shift Missed", message: "You do not have an applicable shift right now.", subMessage: "Your scheduled time has already passed."
             });
           }
           return;
@@ -774,44 +760,26 @@ export default function TimeClockDashboard() {
       }
 
       const punchId = `tck_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
-      const nowIso = getLocalIsoString();
+      const nowIso = new Date().toISOString(); 
 
       const { error: err1 } = await supabase.from('time_punches').insert({
-        id: punchId,
-        company_id: companyId,
-        employee_id: employee.id,
-        store_id: storeId || null,
-        clock_in: nowIso,
-        type: "Regular",
-        status: "Approved",
-        applied_rounding_mins: appliedRoundingMins
+        id: punchId, company_id: companyId, employee_id: employee.id, store_id: storeId || null,
+        clock_in: nowIso, type: "Regular", status: "Approved", applied_rounding_mins: appliedRoundingMins
       });
 
       if (err1) {
         const { error: err2 } = await supabase.from('time_punches').insert({
-          id: punchId,
-          company_id: companyId,
-          employee_id: employee.id,
-          store_id: storeId || null,
-          clock_in: nowIso,
-          type: "Regular",
-          status: "Approved"
+          id: punchId, company_id: companyId, employee_id: employee.id, store_id: storeId || null, clock_in: nowIso, type: "Regular", status: "Approved"
         });
 
         if (err2) {
           const { error: err3 } = await supabase.from('time_punches').insert({
-            id: punchId,
-            company_id: companyId,
-            employee_id: employee.id,
-            clock_in: nowIso,
-            type: "Regular",
-            status: "Approved"
+            id: punchId, company_id: companyId, employee_id: employee.id, clock_in: nowIso, type: "Regular", status: "Approved"
           });
           if (err3) throw err3;
         }
       }
       
-      // --- CLOCK IN MESSAGE LOGIC ---
       let displayMsg = "Welcome, {name}!";
       try {
         const { data: empData } = await supabase.from('employees').select('first_name, next_clock_in_message').eq('id', employee.id).single();
@@ -839,24 +807,18 @@ export default function TimeClockDashboard() {
       }
 
       setFeedbackModal({
-          type: "welcome",
-          title: "Clocked In Successfully",
-          message: displayMsg,
-          subMessage: `Clocked IN at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
+          type: "welcome", title: "Clocked In Successfully", message: displayMsg,
+          subMessage: `Clocked IN at ${new Date().toLocaleTimeString('en-US', { timeZone: storeTimezone, hour: 'numeric', minute: '2-digit', hour12: true })}`
       });
       
       const empIds = employeeData.map(e => e.id);
-      await refreshStatus(empIds, companyId, storeId);
+      await refreshStatus(empIds, companyId, storeId, storeTimezone);
     } catch (err: any) {
       const errorString = JSON.stringify(err);
       if (err.code === '23505' || errorString.includes('duplicate') || errorString.includes('one_active_shift')) {
-        setFeedbackModal({
-            type: "info",
-            title: "Already Clocked In",
-            message: "You are already clocked in! Your status has been refreshed.",
-        });
+        setFeedbackModal({ type: "info", title: "Already Clocked In", message: "You are already clocked in! Your status has been refreshed." });
         const empIds = employeeData.map(e => e.id);
-        await refreshStatus(empIds, companyId, storeId);
+        await refreshStatus(empIds, companyId, storeId, storeTimezone);
       } else {
         setFeedbackModal({ type: "error", title: "Error", message: "Error clocking in. Please try again." });
       }
@@ -865,10 +827,9 @@ export default function TimeClockDashboard() {
 
   const handleClockOut = async () => {
     if (!activePunchId || !employee) return;
-    let nowIso = getLocalIsoString();
+    let nowIso = new Date().toISOString(); 
 
     try {
-      // --- MINIMUM REPORTING PAY & ROUNDING LOGIC ---
       const { data: punchData } = await supabase.from('time_punches').select('clock_in, store_id').eq('id', activePunchId).single();
       
       if (punchData && punchData.clock_in) {
@@ -881,9 +842,9 @@ export default function TimeClockDashboard() {
             .eq('store_id', activeStoreId).limit(1);
 
           const s = settingsData?.[0];
-          const minPayActive = s?.min_reporting_pay === 1 || s?.min_reporting_pay === true || String(s?.min_reporting_pay).toLowerCase() === "true" || String(s?.min_reporting_pay).toLowerCase() === "1";
+          const minPayActive = s?.min_reporting_pay === 1 || String(s?.min_reporting_pay).toLowerCase() === "true";
           const minHrs = parseFloat(s?.min_reporting_hours as string) || 3.0;
-          const isRounded = s?.round_time_punches === 1 || s?.round_time_punches === true || String(s?.round_time_punches).toLowerCase() === "true" || String(s?.round_time_punches).toLowerCase() === "1";
+          const isRounded = s?.round_time_punches === 1 || String(s?.round_time_punches).toLowerCase() === "true";
           const roundMins = parseInt(s?.rounding_increment_mins as string, 10) || 15;
 
           const roundDate = (dt: Date, rMins: number) => {
@@ -923,42 +884,41 @@ export default function TimeClockDashboard() {
           const netHours = Math.max(0, grossSec - breakSec) / 3600.0;
 
           if (minPayActive && netHours >= 0 && netHours < minHrs) {
-              const tzoffset = clockInDt.getTimezoneOffset() * 60000;
-              const dateStr = new Date(clockInDt.getTime() - tzoffset).toISOString().split('T')[0];
+              const dateStr = getZonedDateStr(clockInDt, storeTimezone);
               
-              const { data: schedData } = await supabase.from('schedules').select('id').eq('employee_id', employee.id).eq('date', dateStr).limit(1);
+              // OFFSET RULE: Padded window
+              const yesterday = new Date(clockInDt); yesterday.setDate(clockInDt.getDate() - 1);
+              const tomorrow = new Date(clockInDt); tomorrow.setDate(clockInDt.getDate() + 1);
+
+              const { data: schedData } = await supabase.from('schedules').select('date, id')
+                .eq('employee_id', employee.id)
+                .gte('date', getZonedDateStr(yesterday, storeTimezone))
+                .lte('date', getZonedDateStr(tomorrow, storeTimezone));
               
-              if (schedData && schedData.length > 0) {
+              const shift = (schedData || []).find(s => s.date === dateStr);
+              
+              if (shift) {
                   const paddedSec = breakSec + (minHrs * 3600.0);
                   const paddedOutDt = new Date(clockInDt.getTime() + (paddedSec * 1000));
-                  const tzoffset2 = paddedOutDt.getTimezoneOffset() * 60000;
-                  nowIso = new Date(paddedOutDt.getTime() - tzoffset2).toISOString().slice(0, -1);
+                  nowIso = paddedOutDt.toISOString();
               }
           }
       }
-      // --- END MINIMUM REPORTING PAY LOGIC ---
 
-      const { error } = await supabase.from('time_punches')
-        .update({ clock_out: nowIso, status: 'Approved' })
-        .eq('id', activePunchId);
-      
+      const { error } = await supabase.from('time_punches').update({ clock_out: nowIso, status: 'Approved' }).eq('id', activePunchId);
       if (error) throw error;
 
       if (activeBreakId) {
-        await supabase.from('time_punch_breaks')
-          .update({ break_end: nowIso })
-          .eq('id', activeBreakId);
+        await supabase.from('time_punch_breaks').update({ break_end: nowIso }).eq('id', activeBreakId);
       }
 
       setFeedbackModal({
-          type: "success",
-          title: "Shift Complete",
-          message: "You have successfully clocked out. Have a great day!",
-          subMessage: `Clocked OUT at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
+          type: "success", title: "Shift Complete", message: "You have successfully clocked out. Have a great day!",
+          subMessage: `Clocked OUT at ${new Date().toLocaleTimeString('en-US', { timeZone: storeTimezone, hour: 'numeric', minute: '2-digit', hour12: true })}`
       });
 
       const empIds = employeeData.map(e => e.id);
-      await refreshStatus(empIds, companyId, storeId);
+      await refreshStatus(empIds, companyId, storeId, storeTimezone);
     } catch (err: any) {
       setFeedbackModal({ type: "error", title: "Error", message: "Error Clocking Out. Please try again." });
     }
@@ -968,35 +928,40 @@ export default function TimeClockDashboard() {
     if (!activePunchId || !employee || !companyId) return;
     setShowBreakModal(false);
 
-    const breakId = `tcb_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
-    const nowIso = getLocalIsoString();
-
     try {
+      // --- NEW: DB GATEKEEPER CHECK ---
+      // Verifies the punch isn't already clocked out before allowing a break
+      const { data: punchCheck } = await supabase.from('time_punches').select('clock_out').eq('id', activePunchId).single();
+      if (punchCheck && punchCheck.clock_out) {
+        setFeedbackModal({ type: "info", title: "Shift Ended", message: "This shift was already clocked out on another device." });
+        const empIds = employeeData.map(e => e.id);
+        await refreshStatus(empIds, companyId, storeId, storeTimezone);
+        return;
+      }
+      // --------------------------------
+
+      const breakId = `tcb_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
+      const nowIso = new Date().toISOString();
+
       const { error } = await supabase.from('time_punch_breaks').insert({
-        id: breakId,
-        company_id: companyId,
-        punch_id: activePunchId,
-        break_start: nowIso,
-        break_type: breakType
+        id: breakId, company_id: companyId, punch_id: activePunchId, break_start: nowIso, break_type: breakType
       });
 
       if (error) throw error;
 
       setFeedbackModal({
-          type: "info",
-          title: "Break Started",
-          message: `Enjoy your ${breakType} break!`,
-          subMessage: `Started at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
+          type: "info", title: "Break Started", message: `Enjoy your ${breakType} break!`,
+          subMessage: `Started at ${new Date().toLocaleTimeString('en-US', { timeZone: storeTimezone, hour: 'numeric', minute: '2-digit', hour12: true })}`
       });
 
       const empIds = employeeData.map(e => e.id);
-      await refreshStatus(empIds, companyId, storeId);
+      await refreshStatus(empIds, companyId, storeId, storeTimezone);
     } catch (err: any) {
       const errorString = JSON.stringify(err);
       if (err.code === '23505' || errorString.includes('duplicate') || errorString.includes('one_active_break')) {
         setFeedbackModal({ type: "info", title: "Already on Break", message: "You are already on a break! Your status has been refreshed." });
         const empIds = employeeData.map(e => e.id);
-        await refreshStatus(empIds, companyId, storeId);
+        await refreshStatus(empIds, companyId, storeId, storeTimezone);
       } else {
         setFeedbackModal({ type: "error", title: "Error", message: "Error starting break. Please try again." });
       }
@@ -1005,24 +970,19 @@ export default function TimeClockDashboard() {
 
   const handleEndBreak = async () => {
     if (!activeBreakId || !employee) return;
-    const nowIso = getLocalIsoString();
+    const nowIso = new Date().toISOString();
 
     try {
-      const { error } = await supabase.from('time_punch_breaks')
-        .update({ break_end: nowIso })
-        .eq('id', activeBreakId);
-
+      const { error } = await supabase.from('time_punch_breaks').update({ break_end: nowIso }).eq('id', activeBreakId);
       if (error) throw error;
 
       setFeedbackModal({
-          type: "success",
-          title: "Break Ended",
-          message: "Welcome back!",
-          subMessage: `Ended at ${new Date().toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}`
+          type: "success", title: "Break Ended", message: "Welcome back!",
+          subMessage: `Ended at ${new Date().toLocaleTimeString('en-US', { timeZone: storeTimezone, hour: 'numeric', minute: '2-digit', hour12: true })}`
       });
 
       const empIds = employeeData.map(e => e.id);
-      await refreshStatus(empIds, companyId, storeId);
+      await refreshStatus(empIds, companyId, storeId, storeTimezone);
     } catch (err: any) {
       setFeedbackModal({ type: "error", title: "Error", message: "Error ending break. Please try again." });
     }
@@ -1045,14 +1005,8 @@ export default function TimeClockDashboard() {
 
     try {
       const { error } = await supabase.from('time_off_requests').insert({
-        id: reqId,
-        company_id: companyId,
-        employee_id: employee.id,
-        start_date: toStart,
-        end_date: toEnd,
-        type: toType,
-        status: 'Pending',
-        employee_notes: toNotes.trim()
+        id: reqId, company_id: companyId, employee_id: employee.id, start_date: toStart, end_date: toEnd,
+        type: toType, status: 'Pending', employee_notes: toNotes.trim()
       });
 
       if (error) throw error;
@@ -1065,7 +1019,7 @@ export default function TimeClockDashboard() {
       setToNotes("");
       
       const empIds = employeeData.map(e => e.id);
-      await fetchTimeOffs(empIds);
+      await fetchTimeOffs(empIds, storeTimezone);
     } catch (err) {
       setFeedbackModal({ type: "error", title: "Error", message: "Failed to submit time off request." });
     }
@@ -1075,7 +1029,7 @@ export default function TimeClockDashboard() {
     try {
       await supabase.from('time_off_requests').delete().eq('id', reqId);
       const empIds = employeeData.map(e => e.id);
-      if (empIds.length > 0) await fetchTimeOffs(empIds);
+      if (empIds.length > 0) await fetchTimeOffs(empIds, storeTimezone);
     } catch (err) {
       console.error("Error deleting time off request:", err);
     }
@@ -1085,8 +1039,6 @@ export default function TimeClockDashboard() {
     localStorage.removeItem('chronara_web_user');
     router.push("/timeclock");
   };
-
-
 
   // ============================================================================
   // 5. UI RENDER (JSX)
@@ -1291,10 +1243,10 @@ export default function TimeClockDashboard() {
           </div>
           <div className="text-right">
             <div className="text-[40px] font-light tracking-wider" style={{ color: themeColor }}>
-              {currentTime.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}
+              {currentTime.toLocaleTimeString('en-US', { timeZone: storeTimezone, hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true })}
             </div>
             <div className="text-gray-400 text-sm mt-1">
-              {currentTime.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+              {getZonedTime(currentTime, storeTimezone).toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
             </div>
           </div>
         </header>

@@ -188,6 +188,24 @@ const NativeDonutChart = ({ title, dataDict }: any) => {
 // MAIN DASHBOARD COMPONENT
 // ============================================================================
 
+
+// --- TIMEZONE HELPERS ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
+
 export default function DashboardModule({ companyId, storeId, themeColor, user }: DashboardProps) {
   const isAdmin = user?.is_admin || user?.is_owner;
   
@@ -204,6 +222,8 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
 
   // Filter State
   const [stores, setStores] = useState<Record<string, string>>({});
+  const [storeProvinces, setStoreProvinces] = useState<Record<string, string>>({}); // <--- NEW
+  const [companyProvince, setCompanyProvince] = useState("ON"); // <--- NEW
   const [users, setUsers] = useState<Record<string, string>>({});
   const [selectedStore, setSelectedStore] = useState(isAdmin && storeId !== "ALL_STORES" ? storeId : "All Stores");
   const [selectedUser, setSelectedUser] = useState("All Users");
@@ -216,12 +236,14 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
   // 1. Initial Load (Admin Mappings & Settings)
   useEffect(() => {
     const fetchMappingsAndSettings = async () => {
-      // Fetch company settings for Tips toggle
       try {
-        const { data: compData } = await supabase.from('companies').select('config_json').eq('id', companyId).single();
-        if (compData && compData.config_json) {
-          const config = typeof compData.config_json === 'string' ? JSON.parse(compData.config_json) : compData.config_json;
-          setAcceptTips(config.accept_tips ?? false);
+        const { data: compData } = await supabase.from('companies').select('config_json, province').eq('id', companyId).single();
+        if (compData) {
+          setCompanyProvince(compData.province || "ON");
+          if (compData.config_json) {
+            const config = typeof compData.config_json === 'string' ? JSON.parse(compData.config_json) : compData.config_json;
+            setAcceptTips(config.accept_tips ?? false);
+          }
         }
       } catch (e) {
         console.error("Failed to fetch company settings", e);
@@ -230,10 +252,15 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
       if (!isAdmin) return;
       
       try {
-        const { data: storeData } = await supabase.from('stores').select('id, name').eq('company_id', companyId);
+        const { data: storeData } = await supabase.from('stores').select('id, name, province').eq('company_id', companyId);
         const sMap: Record<string, string> = {};
-        storeData?.forEach(s => sMap[s.id] = s.name);
+        const pMap: Record<string, string> = {};
+        storeData?.forEach(s => {
+            sMap[s.id] = s.name;
+            pMap[s.id] = s.province || "ON";
+        });
         setStores(sMap);
+        setStoreProvinces(pMap);
 
         const { data: empData } = await supabase.from('employees').select('user_id, first_name, last_name').eq('company_id', companyId);
         const uMap: Record<string, string> = {};
@@ -266,38 +293,65 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
     const loadDashboardData = async () => {
       setIsLoading(true);
       try {
-        const monthIndex = (months.indexOf(selectedMonth) + 1).toString().padStart(2, '0');
-        const datePrefix = selectedDay === "All" ? `${selectedYear}-${monthIndex}-` : `${selectedYear}-${monthIndex}-${selectedDay}`;
         const isSingleDay = selectedDay !== "All";
-
+        const mIndex = months.indexOf(selectedMonth) + 1;
         const targetUser = isAdmin ? (selectedUser === "All Users" ? null : Object.keys(users).find(k => users[k] === selectedUser)) : user?.id;
         const targetStore = isAdmin ? (selectedStore === "All Stores" ? null : (stores[selectedStore] ? selectedStore : Object.keys(stores).find(k => stores[k] === selectedStore))) : (storeId === "ALL_STORES" ? null : storeId);
 
-        // Fetch Sales
+        // --- THE FIX: PADDED UTC WINDOW QUERY ---
+        // Fetch the entire month +/- 5 days to absolutely guarantee we catch all timezone offsets
+        const padStart = new Date(Date.UTC(parseInt(selectedYear), mIndex - 1, 1));
+        padStart.setUTCDate(padStart.getUTCDate() - 5);
+        const startUtcStr = padStart.toISOString();
+
+        const padEnd = new Date(Date.UTC(parseInt(selectedYear), mIndex, 0));
+        padEnd.setUTCDate(padEnd.getUTCDate() + 5);
+        const endUtcStr = padEnd.toISOString();
+
         let salesQ = supabase.from('sales')
           .select('id, date, total')
           .eq('company_id', companyId)
-          .like('date', `${datePrefix}%`)
-          .neq('is_deleted', true); // <--- ADD THIS
+          .gte('date', startUtcStr)
+          .lte('date', endUtcStr)
+          .neq('is_deleted', true);
           
         if (targetUser) salesQ = salesQ.eq('user_id', targetUser);
         if (targetStore) salesQ = salesQ.eq('store_id', targetStore);
         const { data: rawSales } = await salesQ;
 
-        // Fetch Tips to subtract
         let tipsQ = supabase.from('tips_ledger')
-          .select('sale_id, amount')
+          .select('sale_id, amount, date')
           .eq('company_id', companyId)
-          .like('date', `${datePrefix}%`)
-          .neq('is_deleted', true); // <--- ADD THIS
+          .gte('date', startUtcStr)
+          .lte('date', endUtcStr)
+          .neq('is_deleted', true);
           
         if (targetUser) tipsQ = tipsQ.eq('user_id', targetUser);
         if (targetStore) tipsQ = tipsQ.eq('store_id', targetStore);
         const { data: rawTips } = await tipsQ;
 
+        // Determine Local Timezone for Projection
+        const targetProv = targetStore ? (storeProvinces[targetStore] || companyProvince) : companyProvince;
+        const localTz = getStoreTimezone(targetProv, !targetStore);
+
+        const formatter = new Intl.DateTimeFormat('en-US', {
+            timeZone: localTz,
+            year: 'numeric', month: '2-digit', day: '2-digit',
+            hour: '2-digit', hour12: false, weekday: 'short'
+        });
+
+        // Map Tips
         const tipsMap: Record<string, number> = {};
         let totalTips = 0;
         rawTips?.forEach(t => {
+          if (!t.date) return;
+          const parts = formatter.formatToParts(new Date(t.date));
+          const pMap: Record<string, string> = {};
+          parts.forEach(p => pMap[p.type] = p.value);
+          
+          if (pMap['year'] !== selectedYear || parseInt(pMap['month']) !== mIndex) return;
+          if (isSingleDay && pMap['day'] !== selectedDay.padStart(2, '0')) return;
+
           const amt = parseFloat(t.amount || 0);
           tipsMap[t.sale_id] = (tipsMap[t.sale_id] || 0) + amt;
           totalTips += amt;
@@ -321,43 +375,53 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
         const allTotals: number[] = [];
 
         rawSales?.forEach(s => {
+           if (!s.date) return;
+
+           // PROJECT TO LOCAL TIME
+           const parts = formatter.formatToParts(new Date(s.date));
+           const pMap: Record<string, string> = {};
+           parts.forEach(p => pMap[p.type] = p.value);
+
+           const projYear = pMap['year'];
+           const projMonth = pMap['month'];
+           const projDay = pMap['day'];
+           const projHour = parseInt(pMap['hour']);
+           const dowStr = pMap['weekday'];
+
+           // APPLY STRICT FILTER IN MEMORY
+           if (projYear !== selectedYear || parseInt(projMonth) !== mIndex) return;
+           if (isSingleDay && projDay !== selectedDay.padStart(2, '0')) return;
+
+           // Add to buckets
            saleIds.push(s.id);
            const val = parseFloat(s.total || 0) - (tipsMap[s.id] || 0);
            totalSalesVal += val;
            allTotals.push(val);
 
-           if (s.date && s.date.length >= 19) {
-              const dayKey = s.date.substring(0, 10);
-              const hourInt = parseInt(s.date.substring(11, 13));
-              
-              uniqueDays.add(dayKey);
-              uniqueHours.add(`${dayKey} ${hourInt}`);
+           const dayKey = `${projYear}-${projMonth}-${projDay}`;
+           uniqueDays.add(dayKey);
+           uniqueHours.add(`${dayKey} ${projHour}`);
 
-              const ampm = hourInt < 12 ? "AM" : "PM";
-              let disp = hourInt <= 12 ? hourInt : hourInt - 12;
-              if (disp === 0) disp = 12;
-              hourly_chart[`${disp}${ampm}`] += val;
+           const ampm = projHour < 12 ? "AM" : "PM";
+           let disp = projHour <= 12 ? projHour : projHour - 12;
+           if (disp === 0) disp = 12;
+           hourly_chart[`${disp}${ampm}`] += val;
 
-              daily_trend[dayKey] = (daily_trend[dayKey] || 0) + val;
+           daily_trend[dayKey] = (daily_trend[dayKey] || 0) + val;
 
-              const dateObj = new Date(dayKey);
-              const dayNames = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-              const dowStr = dayNames[dateObj.getUTCDay()];
-              if (dow_chart[dowStr as keyof typeof dow_chart] !== undefined) {
-                 dow_chart[dowStr as keyof typeof dow_chart] += val;
-              }
+           if (dow_chart[dowStr as keyof typeof dow_chart] !== undefined) {
+              dow_chart[dowStr as keyof typeof dow_chart] += val;
            }
         });
 
         // Pre-fill daily trend for whole month if viewing "All" days
         if (!isSingleDay) {
           const y = parseInt(selectedYear);
-          const m = months.indexOf(selectedMonth) + 1;
-          const dCount = new Date(y, m, 0).getDate();
-          const nowCompare = new Date().toISOString().substring(0, 10);
+          const dCount = new Date(y, mIndex, 0).getDate();
+          const nowCompare = new Date().toLocaleDateString('en-CA', { timeZone: localTz });
 
           for (let i = 1; i <= dCount; i++) {
-            const dStr = `${y}-${m.toString().padStart(2, '0')}-${i.toString().padStart(2, '0')}`;
+            const dStr = `${y}-${mIndex.toString().padStart(2, '0')}-${i.toString().padStart(2, '0')}`;
             if (dStr > nowCompare) break;
             if (!daily_trend[dStr]) daily_trend[dStr] = 0;
           }
@@ -369,7 +433,6 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
         const payment_methods: Record<string, number> = {};
 
         if (saleIds.length > 0) {
-            // Note: In a massive DB this should be paginated, but standard for POS Lite
             const { data: itemData } = await supabase.from('sale_items').select('name, price, qty, sku').in('sale_id', saleIds);
             itemData?.forEach(item => {
                const qty = parseFloat(item.qty || 0);
@@ -377,7 +440,6 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
                if (item.name === "Tips" || item.sku === "SYS_TIP" || val <= 0) return;
                
                top_products[item.name] = (top_products[item.name] || 0) + val;
-               // Standardized category fallback since no direct join
                category_sales["Standard"] = (category_sales["Standard"] || 0) + val;
             });
 
@@ -420,7 +482,7 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
           transaction_count: rawSales?.length || 0,
           avg_per_day: uniqueDays.size ? totalSalesVal / uniqueDays.size : 0,
           median_val: median,
-          std_dev: std_dev, // <--- ADDED HERE
+          std_dev: std_dev,
           hourly_chart,
           dow_chart,
           daily_trend: sortedDailyTrend,

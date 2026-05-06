@@ -23,10 +23,27 @@ const DENOMINATIONS = [
   { label: "5¢ Nickels", mult: 0.05 }
 ];
 
+// --- TIMEZONE HELPERS ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
 export default function OpenCloseModule({ companyId, storeId, themeColor, user }: OpenCloseProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [storeName, setStoreName] = useState("");
+  const [storeProvince, setStoreProvince] = useState("ON"); // <--- NEW: Track province for Z-Report time
   
   // Session State
   const [sessionType, setSessionType] = useState<"Open" | "Close">("Open");
@@ -62,14 +79,20 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
   const loadSessionData = async () => {
     setIsLoading(true);
     try {
-      // 1. Fetch Store Name & Company Config
+      // 1. Fetch Store Name, Province, & Company Config
       let sName = storeId === "ALL_STORES" ? "All Stores" : storeId;
+      let sProv = "ON"; // Default fallback
       
       if (storeId && storeId !== "ALL_STORES") {
-        const { data: sData } = await supabase.from('stores').select('name').eq('id', storeId).single();
+        const { data: sData } = await supabase.from('stores').select('name, province').eq('id', storeId).single();
         if (sData?.name) sName = sData.name;
+        if (sData?.province) sProv = sData.province.toUpperCase();
+      } else {
+        const { data: cData } = await supabase.from('companies').select('province').eq('id', companyId).single();
+        if (cData?.province) sProv = cData.province.toUpperCase();
       }
       setStoreName(sName);
+      setStoreProvince(sProv);
 
       const { data: compData } = await supabase.from('companies').select('config_json').eq('id', companyId).single();
       let isBlind = true;
@@ -202,83 +225,86 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
   const calculateExpectations = async (sinceTs: number, openingFloat: number, currentMethods: string[]) => {
     try {
-      const sinceDate = new Date(sinceTs * 1000);
-      const year = sinceDate.getFullYear();
-      const month = String(sinceDate.getMonth() + 1).padStart(2, "0");
-      const day = String(sinceDate.getDate()).padStart(2, "0");
-      const hours = String(sinceDate.getHours()).padStart(2, "0");
-      const mins = String(sinceDate.getMinutes()).padStart(2, "0");
-      const secs = String(sinceDate.getSeconds()).padStart(2, "0");
-      const sinceStr = `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
+      // --- THE FIX: STRICT UTC RULE ---
+      // We convert the epoch timestamp directly into a strict UTC ISO string
+      const sinceStr = new Date(sinceTs * 1000).toISOString(); 
 
       const targetStoreId = storeId === "ALL_STORES" ? null : storeId;
 
-      // Cash Drops/Adds
+      const parseMoney = (val: any) => {
+          if (val === null || val === undefined) return 0;
+          if (typeof val === 'number') return val;
+          const str = String(val).replace(/[^0-9.-]+/g, "");
+          return parseFloat(str) || 0;
+      };
+
+      // Cash Drops/Adds (Cash sessions explicitly manage is_deleted, so we keep the filter here)
       let dropsQuery = supabase.from('cash_sessions')
         .select('total')
         .eq('company_id', companyId)
         .gte('timestamp', sinceTs)
-        .in('type', ['Add Cash', 'Remove Cash'])
-        .neq('is_deleted', true);
-      
-      if (targetStoreId) dropsQuery = dropsQuery.eq('store_id', targetStoreId);
-      else dropsQuery = dropsQuery.is('store_id', null);
+        .in('type', ['Add Cash', 'Remove Cash'])
+        .neq('is_deleted', true);
+      
+      if (targetStoreId) dropsQuery = dropsQuery.eq('store_id', targetStoreId);
+      else dropsQuery = dropsQuery.is('store_id', null);
 
-      const dropsData = await fetchAll(dropsQuery);
-      const netDrops = dropsData.reduce((acc, row) => acc + parseFloat(row.total || 0), 0);
+      const dropsData = await fetchAll(dropsQuery);
+      const netDrops = dropsData.reduce((acc, row) => acc + parseMoney(row.total), 0);
 
-      // Cash Sales
-      let salesQuery = supabase.from('sales')
-        .select('id, total')
-        .eq('company_id', companyId)
-        .gte('date', sinceStr)
-        .eq('method', 'Cash')
-        .neq('is_deleted', true);
+      // Cash Sales (Removed is_deleted filter to match Python SQLite behavior)
+      let salesQuery = supabase.from('sales')
+        .select('id, total')
+        .eq('company_id', companyId)
+        .gte('date', sinceStr)
+        .eq('method', 'Cash');
 
-      if (targetStoreId) salesQuery = salesQuery.eq('store_id', targetStoreId);
-      else salesQuery = salesQuery.is('store_id', null);
+      if (targetStoreId) salesQuery = salesQuery.eq('store_id', targetStoreId);
+      else salesQuery = salesQuery.is('store_id', null);
 
-      const salesData = await fetchAll(salesQuery);
-      const cashSales = salesData.reduce((acc, row) => acc + parseFloat(row.total || 0), 0);
+      const salesData = await fetchAll(salesQuery);
+      const cashSales = salesData.reduce((acc, row) => acc + parseMoney(row.total), 0);
 
-      setExpectedCash(openingFloat + netDrops + cashSales);
+      setExpectedCash(openingFloat + netDrops + cashSales);
 
-      // Non-Cash Expectations
-      let allSalesQuery = supabase.from('sales')
-        .select('id')
-        .eq('company_id', companyId)
-        .gte('date', sinceStr)
-        .neq('is_deleted', true);
-        
-      if (targetStoreId) allSalesQuery = allSalesQuery.eq('store_id', targetStoreId);
-      else allSalesQuery = allSalesQuery.is('store_id', null);
+      // Non-Cash Expectations
+      let allSalesQuery = supabase.from('sales')
+        .select('id')
+        .eq('company_id', companyId)
+        .gte('date', sinceStr);
+        
+      if (targetStoreId) allSalesQuery = allSalesQuery.eq('store_id', targetStoreId);
+      else allSalesQuery = allSalesQuery.is('store_id', null);
 
-      const allSalesData = await fetchAll(allSalesQuery);
-      const saleIds = allSalesData.map(s => s.id);
+      const allSalesData = await fetchAll(allSalesQuery);
+      const saleIds = allSalesData.map(s => s.id);
 
-      const ncTotals: Record<string, number> = {};
-      currentMethods.forEach(m => ncTotals[m] = 0.0);
+      const ncTotals: Record<string, number> = {};
+      currentMethods.forEach(m => ncTotals[m] = 0.0);
 
-      if (saleIds.length > 0) {
-         let paymentsQuery = supabase.from('sale_payments')
-           .select('method, amount')
-           .in('sale_id', saleIds)
-           .neq('is_deleted', true);
-           
-         const paymentsData = await fetchAll(paymentsQuery);
-         paymentsData.forEach(p => {
-            const m = p.method;
-            if (m && m.toLowerCase() !== 'cash') {
-               ncTotals[m] = (ncTotals[m] || 0) + parseFloat(p.amount || 0);
-            }
-         });
-      }
-      setExpectedNonCash(ncTotals);
+      if (saleIds.length > 0) {
+         // Chunking array to prevent URL overflow on huge shifts
+         const chunkSize = 100;
+         let allPayments: any[] = [];
+         for (let i = 0; i < saleIds.length; i += chunkSize) {
+             const chunk = saleIds.slice(i, i + chunkSize);
+             const paymentsData = await fetchAll(supabase.from('sale_payments').select('method, amount').in('sale_id', chunk));
+             allPayments = allPayments.concat(paymentsData);
+         }
+         
+         allPayments.forEach(p => {
+            const m = p.method;
+            if (m && m.toLowerCase() !== 'cash') {
+               ncTotals[m] = (ncTotals[m] || 0) + parseMoney(p.amount);
+            }
+         });
+      }
+      setExpectedNonCash(ncTotals);
 
-    } catch (e) {
-      console.error("Error calculating expectations:", e);
-    }
-  };
+    } catch (e) {
+      console.error("Error calculating expectations:", e);
+    }
+  };
 
   // --- CALCULATION HELPERS ---
   const currentCashTotal = useMemo(() => {
@@ -295,60 +321,63 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
   // --- SAVE & Z-REPORT LOGIC ---
   const handleSave = async () => {
-    if (currentCashTotal === 0 && !window.confirm(`Total cash ${sessionType} is $0.00. Are you sure?`)) {
-      return;
-    }
+    if (currentCashTotal === 0 && !window.confirm(`Total cash ${sessionType} is $0.00. Are you sure?`)) {
+      return;
+    }
 
-    setIsSaving(true);
+    setIsSaving(true);
 
-    // =======================================================
-    // --- NEW: PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
-    // =======================================================
-    try {
-      let query = supabase
-        .from('cash_sessions')
-        .select('type')
-        .eq('company_id', companyId)
-        .in('type', ['Open', 'Close'])
-        .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
-        .limit(1);
+    // =======================================================
+    // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
+    // =======================================================
+    try {
+      let query = supabase
+        .from('cash_sessions')
+        .select('type')
+        .eq('company_id', companyId)
+        .in('type', ['Open', 'Close'])
+        .neq('is_deleted', true)
+        .order('timestamp', { ascending: false })
+        .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
-      else query = query.is('store_id', null);
+      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
+      else query = query.is('store_id', null);
 
-      const { data: preSaveData, error: preSaveError } = await query;
-      if (!preSaveError && preSaveData && preSaveData.length > 0) {
-        const cloudLastType = preSaveData[0].type;
-        const expectedNextAction = cloudLastType === "Open" ? "Close" : "Open";
-        
-        if (expectedNextAction !== sessionTypeRef.current) {
-            const msgAction = cloudLastType === "Open" ? "opened" : "closed";
-            alert(`Conflict: Store is already ${msgAction} on another device.\nThe screen will now refresh.`);
-            setIsSaving(false);
-            loadSessionData();
-            return; // ABORT SAVE
-        }
-      }
-    } catch (err) {
-      console.warn("Pre-save verification bypassed due to network error", err);
-    }
-    // =======================================================
+      const { data: preSaveData, error: preSaveError } = await query;
+      if (!preSaveError && preSaveData && preSaveData.length > 0) {
+        const cloudLastType = preSaveData[0].type;
+        const expectedNextAction = cloudLastType === "Open" ? "Close" : "Open";
+        
+        if (expectedNextAction !== sessionTypeRef.current) {
+            const msgAction = cloudLastType === "Open" ? "opened" : "closed";
+            alert(`Conflict: Store is already ${msgAction} on another device.\nThe screen will now refresh.`);
+            setIsSaving(false);
+            loadSessionData();
+            return; 
+        }
+      }
+    } catch (err) {
+      console.warn("Pre-save verification bypassed due to network error", err);
+    }
 
-    try {
+    try {
+      // --- STRICT UTC RULE ---
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, "0");
-      const day = String(now.getDate()).padStart(2, "0");
-      const hours = String(now.getHours()).padStart(2, "0");
-      const mins = String(now.getMinutes()).padStart(2, "0");
-      const secs = String(now.getSeconds()).padStart(2, "0");
-      const todayDateStr = `${year}-${month}-${day}`;
-      const nowIso = `${todayDateStr} ${hours}:${mins}:${secs}`;
+      const nowIso = now.toISOString();
       const nowTs = Math.floor(now.getTime() / 1000);
       const targetStoreId = storeId === "ALL_STORES" ? null : storeId;
 
+      // --- LOCAL PROJECTION FOR Z-REPORT DISPLAY ---
+      const localTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
+      const localDisplayTime = new Intl.DateTimeFormat('en-US', {
+          timeZone: localTz, month: 'short', day: 'numeric', year: 'numeric',
+          hour: '2-digit', minute: '2-digit', second: '2-digit'
+      }).format(now);
+
       const sessionId = `cs_${crypto.randomUUID().replace(/-/g, "")}`;
+      
+      let baseNumericId = Math.floor(Math.random() * 1000000000) + 1000000000;
+      const getNextId = () => baseNumericId++;
 
       // Build JSON Ledger
       const denomJsonDict: any = { ...denomCounts };
@@ -367,7 +396,6 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
            ncVarianceTotal += (act - exp);
         });
 
-        // Auto Inject internal gift card amounts
         if (activePayments.includes("Gift Card")) {
            const gcExp = expectedNonCash["Gift Card"] || 0.0;
            denomJsonDict["Gift Card_Expected"] = gcExp;
@@ -396,7 +424,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
          });
       }
 
-      // 1. Save Cash Session (FIXED: using nowIso for the date field so sync_worker catches it!)
+      // 1. Save Cash Session
       const { error: sessionError } = await supabase.from('cash_sessions').insert([{
          id: sessionId,
          date: nowIso, 
@@ -412,19 +440,29 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
          denominations: denomJsonStr
       }]);
 
-      if (sessionError) throw sessionError;
+      if (sessionError) throw new Error(`Failed to save Cash Session: ${sessionError.message}`);
 
       // ==========================================
       // PHASE 4: BOOKKEEPING INTEGRATION (Z-REPORT)
       // ==========================================
       if (sessionType === "Close") {
+
+          const fedAccount = ["ON", "NB", "NL", "NS", "PE"].includes(storeProvince) ? "HST Payable" : "GST Payable";
+          let provAccount = "PST Payable";
+          if (storeProvince === "MB") provAccount = "RST Payable";
+          else if (storeProvince === "QC") provAccount = "QST Payable";
+
           // A. Dynamically Ensure System Accounts Exist
           const sysAccounts = [
-              { name: "Cash Over/Short", type: "Expense", tax: "E" },
+              { name: "Cash Over/Short", type: "Expense", tax: "Exempt" },
               { name: "Tips Payable", type: "Current Liability", tax: "Exempt" },
               { name: "Gift Card Payable", type: "Current Liability", tax: "Exempt" },
               { name: "Commission Payable", type: "Current Liability", tax: "Exempt" },
-              { name: "Commission Expense", type: "Expense", tax: "Exempt" }
+              { name: "Commission Expense", type: "Expense", tax: "Exempt" },
+              { name: "Cost of Goods Sold", type: "Expense", tax: "Exempt" },
+              { name: "Inventory Asset", type: "Current Asset", tax: "Exempt" },
+              { name: fedAccount, type: "Current Liability", tax: "Exempt" },
+              { name: provAccount, type: "Current Liability", tax: "Exempt" }
           ];
 
           const { data: existingAccs } = await supabase.from('chart_of_accounts').select('name').eq('company_id', companyId).in('name', sysAccounts.map(a => a.name));
@@ -446,17 +484,26 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
           }
 
           // B. Aggregate Data for the Shift
-          const sinceStr = new Date(lastOpenTimestamp * 1000).toISOString().replace('T', ' ').substring(0, 19);
+          // --- THE FIX: STRICT UTC FOR SALES QUERY ---
+          const sinceIso = new Date(lastOpenTimestamp * 1000).toISOString();
           
-          let shiftSalesQuery = supabase.from('sales').select('id, total, tax_val, prov_tax_val').eq('company_id', companyId).gte('date', sinceStr).neq('is_deleted', true);
+          let shiftSalesQuery = supabase.from('sales').select('id, total, tax_val, prov_tax_val').eq('company_id', companyId).gte('date', sinceIso);
           if (targetStoreId) shiftSalesQuery = shiftSalesQuery.eq('store_id', targetStoreId);
           else shiftSalesQuery = shiftSalesQuery.is('store_id', null);
 
           const shiftSales = await fetchAll(shiftSalesQuery);
           const saleIds = shiftSales.map(s => s.id);
 
-          const grossSales = shiftSales.reduce((sum, s) => sum + (s.total || 0), 0);
-          const totalTax = shiftSales.reduce((sum, s) => sum + (s.tax_val || 0) + (s.prov_tax_val || 0), 0);
+          const parseMoney = (val: any) => {
+              if (val === null || val === undefined) return 0;
+              if (typeof val === 'number') return val;
+              const str = String(val).replace(/[^0-9.-]+/g, "");
+              return parseFloat(str) || 0;
+          };
+
+          const grossSales = shiftSales.reduce((sum, s) => sum + parseMoney(s.total), 0);
+          const fedTaxTotal = shiftSales.reduce((sum, s) => sum + parseMoney(s.tax_val), 0);
+          const provTaxTotal = shiftSales.reduce((sum, s) => sum + parseMoney(s.prov_tax_val), 0);
 
           let shiftTips = 0;
           let shiftCommissions = 0;
@@ -464,24 +511,41 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
           let totalCogs = 0;
 
           if (saleIds.length > 0) {
-             const tipsData = await fetchAll(supabase.from('tips_ledger').select('amount').in('sale_id', saleIds).neq('is_deleted', true));
-             shiftTips = tipsData.reduce((sum, t) => sum + (t.amount || 0), 0);
+             const chunkSize = 100;
+             let allTips: any[] = [];
+             let allComms: any[] = [];
+             let allItems: any[] = [];
 
-             const commsData = await fetchAll(supabase.from('commissions_ledger').select('amount').in('sale_id', saleIds).neq('is_deleted', true));
-             shiftCommissions = commsData.reduce((sum, c) => sum + (c.amount || 0), 0);
+             for (let i = 0; i < saleIds.length; i += chunkSize) {
+                 const chunk = saleIds.slice(i, i + chunkSize);
+                 const [tipsData, commsData, itemsData] = await Promise.all([
+                     fetchAll(supabase.from('tips_ledger').select('amount').in('sale_id', chunk)),
+                     fetchAll(supabase.from('commissions_ledger').select('amount').in('sale_id', chunk)),
+                     fetchAll(supabase.from('sale_items').select('sku, qty, price, cost').in('sale_id', chunk))
+                 ]);
+                 allTips = allTips.concat(tipsData);
+                 allComms = allComms.concat(commsData);
+                 allItems = allItems.concat(itemsData);
+             }
 
-             const itemsData = await fetchAll(supabase.from('sale_items').select('sku, qty, price, cost').in('sale_id', saleIds).neq('is_deleted', true));
-             
-             itemsData.forEach(item => {
+             shiftTips = allTips.reduce((sum, t) => sum + parseMoney(t.amount), 0);
+             shiftCommissions = allComms.reduce((sum, c) => sum + parseMoney(c.amount), 0);
+
+             allItems.forEach(item => {
+                 const qty = parseMoney(item.qty);
+                 const price = parseMoney(item.price);
+                 const cost = parseMoney(item.cost);
+
                  if (item.sku === 'SYS_GIFT_CARD') {
-                     gcLoads += (item.qty * item.price);
-                 } else if (item.sku !== 'SYS_TIP') {
-                     totalCogs += (item.qty * item.cost);
+                     gcLoads += (qty * price);
+                 } else {
+                     totalCogs += (qty * cost);
                  }
              });
           }
 
-          const netSales = grossSales - totalTax - shiftTips - gcLoads;
+          // Use the isolated tax amounts to figure out exact net sales
+          const netSales = grossSales - fedTaxTotal - provTaxTotal - shiftTips - gcLoads;
 
           // C. Create Master Journal Entry
           const jeId = `je_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -489,63 +553,87 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
           const varStr = totalVariance > 0 ? `+$${totalVariance.toFixed(2)}` : `-$${Math.abs(totalVariance).toFixed(2)}`;
           const jeDesc = Math.abs(totalVariance) > 0.01 ? `End of Day Z-Report (Variance: ${varStr})` : "End of Day Z-Report (Balanced)";
 
-          await supabase.from('journal_entries').insert([{
+          const { error: jeError } = await supabase.from('journal_entries').insert([{
              id: jeId,
              company_id: companyId,
              store_id: targetStoreId,
-             date: todayDateStr,
+             date: nowIso, // <--- THE FIX: Send the full UTC string
              type: 'Z-Report',
              ref_number: sessionId,
-             total_amount: grossSales, // Will be updated
+             total_amount: grossSales, 
              description: jeDesc,
-             created_at: nowIso,
+             created_at: nowIso, 
              username: user?.username || "System"
           }]);
+          if (jeError) throw new Error(`Failed to create Journal Entry: ${jeError.message}`);
 
           const lines: any[] = [];
-          const pushLine = (acc: string, amt: number, isDebitNormal: boolean) => {
-             if (Math.abs(amt) < 0.001) return;
-             let dr = 0, cr = 0;
-             if (isDebitNormal) {
-                if (amt > 0) dr = amt; else cr = Math.abs(amt);
-             } else {
-                if (amt > 0) cr = amt; else dr = Math.abs(amt);
-             }
-             lines.push({ entry_id: jeId, account: acc, debit: dr, credit: cr });
+          const addLine = (account: string, debit: number, credit: number) => {
+              if (Math.abs(debit) < 0.001 && Math.abs(credit) < 0.001) return;
+              lines.push({ id: getNextId(), entry_id: jeId, account, debit, credit });
           };
+          
+          if (netSales > 0) addLine('Sales', 0.0, netSales);
+          else if (netSales < 0) addLine('Sales', Math.abs(netSales), 0.0);
 
-          // Credits
-          pushLine('Sales', netSales, true);
-          pushLine('HST/GST Payable', totalTax, true);
-          pushLine('Tips Payable', shiftTips, true);
-          pushLine('Gift Card Payable', gcLoads, true);
-          pushLine('Commission Payable', shiftCommissions, true);
-          pushLine('Commission Expense', shiftCommissions, false);
-          pushLine('Cost of Goods Sold', totalCogs, false);
-          pushLine('Inventory Asset', totalCogs, true);
+          if (fedTaxTotal > 0) addLine(fedAccount, 0.0, fedTaxTotal);
+          else if (fedTaxTotal < 0) addLine(fedAccount, Math.abs(fedTaxTotal), 0.0);
 
-          // Debits (Undeposited Funds & Terminals)
-          let cashSalesFromDB = 0;
-          if (saleIds.length > 0) {
-             const cashPayData = await fetchAll(supabase.from('sale_payments').select('amount').in('sale_id', saleIds).eq('method', 'Cash').neq('is_deleted', true));
-             cashSalesFromDB = cashPayData.reduce((sum, p) => sum + (p.amount || 0), 0);
+          if (provTaxTotal > 0) addLine(provAccount, 0.0, provTaxTotal);
+          else if (provTaxTotal < 0) addLine(provAccount, Math.abs(provTaxTotal), 0.0);
+
+          if (shiftTips > 0) addLine('Tips Payable', 0.0, shiftTips);
+          else if (shiftTips < 0) addLine('Tips Payable', Math.abs(shiftTips), 0.0);
+
+          if (shiftCommissions > 0) {
+              addLine('Commission Expense', shiftCommissions, 0.0);
+              addLine('Commission Payable', 0.0, shiftCommissions);
+          } else if (shiftCommissions < 0) {
+              addLine('Commission Expense', 0.0, Math.abs(shiftCommissions));
+              addLine('Commission Payable', Math.abs(shiftCommissions), 0.0);
           }
+
+          if (gcLoads > 0) addLine('Gift Card Payable', 0.0, gcLoads);
+          else if (gcLoads < 0) addLine('Gift Card Payable', Math.abs(gcLoads), 0.0);
+
+          if (totalCogs > 0) {
+              addLine('Cost of Goods Sold', totalCogs, 0.0);
+              addLine('Inventory Asset', 0.0, totalCogs);
+          } else if (totalCogs < 0) {
+              addLine('Cost of Goods Sold', 0.0, Math.abs(totalCogs));
+              addLine('Inventory Asset', Math.abs(totalCogs), 0.0);
+          }
+
+          // Debits: Undeposited Funds - FIX TO USE sinceIso
+          let cashSalesQuery = supabase.from('sales').select('total').eq('company_id', companyId).gte('date', sinceIso).eq('method', 'Cash');
+          if (targetStoreId) cashSalesQuery = cashSalesQuery.eq('store_id', targetStoreId);
+          else cashSalesQuery = cashSalesQuery.is('store_id', null);
+
+          const cashSalesRes = await fetchAll(cashSalesQuery);
+          const cashSalesFromDB = cashSalesRes.reduce((sum, s) => sum + parseMoney(s.total), 0);
+          
           const actualCashFromSales = cashSalesFromDB + cashVariance;
-          pushLine('Undeposited Funds', actualCashFromSales, false);
+          if (actualCashFromSales > 0) addLine('Undeposited Funds', actualCashFromSales, 0.0);
+          else if (actualCashFromSales < 0) addLine('Undeposited Funds', 0.0, Math.abs(actualCashFromSales));
 
           activePayments.forEach(method => {
-             const actVal = denomJsonDict[`${method}_Actual`] || 0.0;
+             const actVal = parseMoney(denomJsonDict[`${method}_Actual`]);
              const targetAcc = method.toLowerCase() === 'gift card' ? 'Gift Card Payable' : 'Undeposited Funds';
-             pushLine(targetAcc, actVal, false);
+             if (actVal > 0) addLine(targetAcc, actVal, 0.0);
+             else if (actVal < 0) addLine(targetAcc, 0.0, Math.abs(actVal));
           });
 
           // Variance
-          pushLine('Cash Over/Short', totalVariance, false);
+          if (totalVariance < 0) addLine('Cash Over/Short', Math.abs(totalVariance), 0.0);
+          else if (totalVariance > 0) addLine('Cash Over/Short', 0.0, totalVariance);
 
           if (lines.length > 0) {
-             await supabase.from('journal_lines').insert(lines);
+             const { error: jlError } = await supabase.from('journal_lines').insert(lines);
+             if (jlError) throw new Error(`Failed to map Journal Lines: ${jlError.message}`);
+
              const jeTotalDr = lines.reduce((sum, l) => sum + l.debit, 0);
-             await supabase.from('journal_entries').update({ total_amount: jeTotalDr }).eq('id', jeId);
+             const { error: jeUpdateError } = await supabase.from('journal_entries').update({ total_amount: jeTotalDr }).eq('id', jeId);
+             if (jeUpdateError) throw new Error(`Failed to index Journal Totals: ${jeUpdateError.message}`);
           }
       }
 
@@ -563,7 +651,8 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
       const fullLogDesc = `${logDesc}\n${detailsText}` + (notes.trim() ? `\n\nNotes: ${notes.trim()}` : "");
 
       await supabase.from("activity_log").insert([{
-        date: todayDateStr,
+        id: getNextId(),
+        date: nowIso, // <--- THE FIX: Send the full UTC string
         timestamp: nowTs,
         company_id: companyId,
         store_id: targetStoreId,
@@ -573,8 +662,8 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
         description: fullLogDesc,
       }]);
 
-      // Show Success
-      let msg = `Till ${sessionType}ed successfully.`;
+      // --- INJECT LOCAL DISPLAY TIME INTO Z-REPORT ---
+      let msg = `Till ${sessionType}ed successfully on ${localDisplayTime}.`;
       if (sessionType === "Close") {
          const stat = isBalanced ? "BALANCED" : (cashVariance > 0 ? "OVER" : "UNDER");
          msg += `\n\n--- CASH RECONCILIATION ---`;
@@ -604,28 +693,101 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
     }
   };
 
+  const handlePrintZReport = () => {
+    const printWindow = window.open("", "_blank", "width=600,height=800");
+    if (!printWindow) {
+      alert("Please allow pop-ups to print the Z-Report.");
+      return;
+    }
+
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Z-Report - ${storeName}</title>
+        <style>
+          @media print {
+            @page { margin: 0; }
+            body { margin: 10mm; }
+          }
+          body {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            color: #000;
+            line-height: 1.4;
+            max-width: 80mm; /* Standard receipt width */
+            margin: 0 auto;
+            padding: 20px;
+          }
+          .title {
+            text-align: center;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 10px;
+          }
+          .header-info {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            margin-bottom: 20px;
+          }
+          .content {
+            white-space: pre-wrap;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="title">Z-REPORT SUMMARY</div>
+        <div class="header-info">
+          <div>Store: ${storeName}</div>
+          <div>User: ${user?.username || "Unknown"}</div>
+        </div>
+        <div class="content">${successBody}</div>
+        <script>
+          window.onload = () => {
+            window.print();
+          };
+        </script>
+      </body>
+      </html>
+    `;
+
+    printWindow.document.open();
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+  };
+
   const handleModalClose = () => {
     setShowSuccess(false);
     loadSessionData(); // Flip Open/Close state
   };
+  
 
   // --- UI RENDER ---
   if (isLoading) {
     return <div className="flex h-full items-center justify-center bg-[#181818]"><p className="text-gray-500">Loading Configuration...</p></div>;
   }
 
+  // Project the header date to the specific store's timezone
+  const currentStoreTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
+  const headerDateStr = new Intl.DateTimeFormat('en-US', { 
+      timeZone: currentStoreTz, 
+      month: 'long', 
+      day: 'numeric', 
+      year: 'numeric' 
+  }).format(new Date());
+
   return (
     <div className="flex flex-col h-full w-full bg-[#181818] font-sans overflow-hidden">
       
       <div className="p-8 pb-4 flex flex-col items-center">
          <h1 className="text-[28px] font-bold tracking-wide" style={{ color: themeColor }}>
-           {sessionType} Till - {new Date().toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+           {sessionType} Till - {headerDateStr}
          </h1>
          <p className="text-gray-500 text-[12px] mt-2 font-medium">
            User: {user?.username} | Store: {storeName}
          </p>
       </div>
-
       <div className="flex-1 overflow-y-auto px-10 pb-10 flex flex-col items-center scrollbar-hide">
          
          {/* Cash Grid */}
@@ -741,20 +903,20 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
             </div>
 
             <div className="p-6 pt-2 shrink-0 flex gap-4">
-               <button 
-                 onClick={() => alert("Print Z-Report module is currently under construction for the web app.")}
-                 style={{ backgroundColor: themeColor }}
-                 className="flex-1 py-3 rounded-lg text-white font-bold text-[15px] transition-transform active:scale-95 shadow-md tracking-wider uppercase hover:brightness-110"
-               >
-                 PRINT Z-REPORT
-               </button>
-               <button 
-                 onClick={handleModalClose}
-                 className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-white font-bold text-[15px] transition-transform active:scale-95 shadow-md tracking-wider uppercase border border-gray-600"
-               >
-                 OKAY
-               </button>
-            </div>
+                <button 
+                  onClick={handlePrintZReport}
+                  style={{ backgroundColor: themeColor }}
+                  className="flex-1 py-3 rounded-lg text-white font-bold text-[15px] transition-transform active:scale-95 shadow-md tracking-wider uppercase hover:brightness-110"
+                >
+                  PRINT Z-REPORT
+                </button>
+                <button 
+                  onClick={handleModalClose}
+                  className="flex-1 py-3 bg-gray-800 hover:bg-gray-700 rounded-lg text-white font-bold text-[15px] transition-transform active:scale-95 shadow-md tracking-wider uppercase border border-gray-600"
+                >
+                  OKAY
+                </button>
+             </div>
 
           </div>
         </div>

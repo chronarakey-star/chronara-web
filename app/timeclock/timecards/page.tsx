@@ -22,8 +22,9 @@ interface Employee {
 interface Store {
   id: string;
   name: string;
+  province?: string;
+  timezone_id?: string;
 }
-
 interface TimeBreak {
   id: string;
   punch_id: string;
@@ -69,6 +70,24 @@ interface FeedbackModal {
 // ============================================================================
 // HELPERS
 // ============================================================================
+const getStoreTimezone = (province?: string) => {
+  if (!province) return "America/Toronto";
+  const p = province.toUpperCase();
+  if (["BC", "BRITISH COLUMBIA"].includes(p)) return "America/Vancouver";
+  if (["AB", "ALBERTA"].includes(p)) return "America/Edmonton";
+  if (["SK", "SASKATCHEWAN"].includes(p)) return "America/Regina";
+  if (["MB", "MANITOBA"].includes(p)) return "America/Winnipeg";
+  if (["ON", "ONTARIO", "QC", "QUEBEC"].includes(p)) return "America/Toronto";
+  if (["NB", "NEW BRUNSWICK", "NS", "NOVA SCOTIA", "PE", "PEI", "PRINCE EDWARD ISLAND"].includes(p)) return "America/Halifax";
+  if (["NL", "NEWFOUNDLAND"].includes(p)) return "America/St_Johns";
+  return "America/Toronto";
+};
+
+const getZonedDateStr = (utcDate: Date, timeZone: string) => {
+  try { return utcDate.toLocaleDateString('en-CA', { timeZone }); } 
+  catch { return utcDate.toLocaleDateString('en-CA'); }
+};
+
 const roundDate = (dt: Date, rMins: number) => {
   if (rMins <= 0) return dt;
   const ms = 1000 * 60 * rMins;
@@ -78,17 +97,38 @@ const roundDate = (dt: Date, rMins: number) => {
   return new Date(newTime);
 };
 
-const toDatetimeLocal = (isoString: string | null) => {
+// --- NEW FIX: DYNAMIC STORE-AWARE TIMEZONE HELPERS ---
+const getStoreDatetimeLocal = (isoString: string | null | undefined, timeZone: string) => {
   if (!isoString) return "";
-  const dt = new Date(isoString);
-  const tzoffset = dt.getTimezoneOffset() * 60000;
-  return new Date(dt.getTime() - tzoffset).toISOString().slice(0, 16);
+  try {
+      const dt = new Date(isoString);
+      if (isNaN(dt.getTime())) return "";
+      const tzDate = new Date(dt.toLocaleString('en-US', { timeZone }));
+      const pad = (n: number) => n.toString().padStart(2, '0');
+      return `${tzDate.getFullYear()}-${pad(tzDate.getMonth() + 1)}-${pad(tzDate.getDate())}T${pad(tzDate.getHours())}:${pad(tzDate.getMinutes())}`;
+  } catch {
+      return "";
+  }
 };
 
-const fromDatetimeLocal = (localString: string) => {
+const parseStoreDatetimeLocal = (localString: string | null | undefined, timeZone: string) => {
   if (!localString) return null;
-  const dt = new Date(localString);
-  return dt.toISOString();
+  try {
+      const guessUtc = new Date(localString); 
+      const guessTzDate = new Date(guessUtc.toLocaleString('en-US', { timeZone }));
+      const offsetMs = guessTzDate.getTime() - guessUtc.getTime();
+      const actualUtc = new Date(guessUtc.getTime() - offsetMs);
+      
+      // Convergence check for DST boundaries
+      const finalTzDate = new Date(actualUtc.toLocaleString('en-US', { timeZone }));
+      if (finalTzDate.getTime() !== guessUtc.getTime()) {
+          const diff = finalTzDate.getTime() - guessUtc.getTime();
+          actualUtc.setTime(actualUtc.getTime() - diff);
+      }
+      return actualUtc.toISOString();
+  } catch {
+      return null;
+  }
 };
 
 // ============================================================================
@@ -130,7 +170,7 @@ export default function MyTimecards() {
   // ============================================================================
   // 3. DATA FETCHING & MATH
   // ============================================================================
-  const fetchTimecards = async (empId: string, compId: string) => {
+  const fetchTimecards = async (empId: string, compId: string, currentStores: Store[] = stores) => {
     try {
       // 1. Base Query for Punches
       let query = supabase.from('time_punches')
@@ -140,12 +180,16 @@ export default function MyTimecards() {
         .order('clock_in', { ascending: false });
 
       if (filterStore !== "All Stores") {
-        const targetStore = stores.find((s: any) => s.name === filterStore);
+        const targetStore = currentStores.find(s => s.name === filterStore);
         if (targetStore) query = query.eq('store_id', targetStore.id);
       }
 
       if (filterDate) {
-        query = query.like('clock_in', `${filterDate}%`);
+        // THE OFFSET RULE: Padded 3-day UTC window
+        const centerDate = new Date(filterDate);
+        const startDate = new Date(centerDate.getTime() - 24 * 60 * 60 * 1000); 
+        const endDate = new Date(centerDate.getTime() + 2 * 24 * 60 * 60 * 1000); 
+        query = query.gte('clock_in', startDate.toISOString()).lte('clock_in', endDate.toISOString());
       }
 
       const { data: punchesData } = await query;
@@ -158,9 +202,15 @@ export default function MyTimecards() {
 
       const schedSet = new Set(schedulesData?.map((s: any) => `${s.employee_id}_${s.date}`));
       let totalHours = 0;
+      
+      // Cache formatters to prevent memory lag in the .map loop
+      const formatterCache: Record<string, { date: Intl.DateTimeFormat, time: Intl.DateTimeFormat }> = {};
 
       // 3. Process and Math
-      const processed: TimePunch[] = punchesData.map((p: any) => {
+      let processed: TimePunch[] = punchesData.map((p: any) => {
+        const store = currentStores.find(s => s.id === p.store_id);
+        const storeTz = store?.timezone_id || getStoreTimezone(store?.province);
+        
         const sSet: any = settingsData?.find((s: any) => s.store_id === p.store_id) || {};
         const roundMins = parseInt(p.applied_rounding_mins || "0", 10);
         const isRounded = roundMins > 0;
@@ -195,9 +245,8 @@ export default function MyTimecards() {
           const netSec = Math.max(0, grossSec - breakSec);
           hours = netSec / 3600.0;
 
-          if ((sSet.min_reporting_pay === 1 || sSet.min_reporting_pay === true) && hours > 0 && hours < parseFloat(sSet.min_reporting_hours || "3.0")) {
-             const tzoffset = dtIn.getTimezoneOffset() * 60000;
-             const localDateStr = new Date(dtIn.getTime() - tzoffset).toISOString().split('T')[0];
+          if ((sSet.min_reporting_pay === 1 || String(sSet.min_reporting_pay).toLowerCase() === "true") && hours > 0 && hours < parseFloat(sSet.min_reporting_hours || "3.0")) {
+             const localDateStr = getZonedDateStr(dtIn, storeTz);
              if (schedSet.has(`${p.employee_id}_${localDateStr}`)) {
                 hours = parseFloat(sSet.min_reporting_hours || "3.0");
                 isPadded = true;
@@ -206,40 +255,45 @@ export default function MyTimecards() {
           totalHours += hours;
         }
 
-        // --- FORMATTING FOR UI ---
-        const formatDate = (dt: Date) => dt.toLocaleDateString('en-US', { month: 'short', day: '2-digit', year: 'numeric' });
-        const formatTime = (dt: Date) => dt.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+        // --- UI FORMATTING VIA INTL.DATETIMEFORMAT ---
+        if (!formatterCache[storeTz]) {
+            formatterCache[storeTz] = {
+                date: new Intl.DateTimeFormat('en-US', { timeZone: storeTz, month: 'short', day: '2-digit', year: 'numeric' }),
+                time: new Intl.DateTimeFormat('en-US', { timeZone: storeTz, hour: 'numeric', minute: '2-digit', hour12: true })
+            };
+        }
+        const { date: dateFormatter, time: timeFormatter } = formatterCache[storeTz];
 
         let displayDate = "Invalid Date";
         let displayIn = "--";
         if (rawIn) {
-          displayDate = formatDate(rawIn);
-          displayIn = formatTime(rawIn);
-          if (dtIn && formatTime(dtIn) !== displayIn) {
-            displayIn = `${displayIn} (${formatTime(dtIn)})`;
+          displayDate = dateFormatter.format(rawIn);
+          displayIn = timeFormatter.format(rawIn);
+          if (dtIn && dtIn.getTime() !== rawIn.getTime()) {
+            displayIn = `${displayIn} (${timeFormatter.format(dtIn)})`;
           }
         }
 
         let displayOut = "Active Shift";
         if (rawOut) {
-          displayOut = formatTime(rawOut);
-          if (dtOut && formatTime(dtOut) !== displayOut) {
-            displayOut = `${displayOut} (${formatTime(dtOut)})`;
+          displayOut = timeFormatter.format(rawOut);
+          if (dtOut && dtOut.getTime() !== rawOut.getTime()) {
+            displayOut = `${displayOut} (${timeFormatter.format(dtOut)})`;
           }
         } else if (p.status === "Approved" && !p.clock_out) {
-          displayOut = "Error"; // Missing punch out
+          displayOut = "Error"; 
         }
 
         let reqInStr = "";
         let reqOutStr = "";
         if (p.status === "Pending Edit") {
-          if (p.req_clock_in) reqInStr = ` (${formatTime(new Date(p.req_clock_in))})`;
-          if (p.req_clock_out) reqOutStr = ` (${formatTime(new Date(p.req_clock_out))})`;
+          if (p.req_clock_in) reqInStr = ` (${timeFormatter.format(new Date(p.req_clock_in))})`;
+          if (p.req_clock_out) reqOutStr = ` (${timeFormatter.format(new Date(p.req_clock_out))})`;
         }
 
         return {
           ...p,
-          type: p.type || "Regular", // FIX: Provide a default fallback so null types never crash the UI
+          type: p.type || "Regular", 
           breaks: myBreaks,
           calculated_hours: hours,
           is_padded: isPadded,
@@ -250,6 +304,17 @@ export default function MyTimecards() {
           req_out_str: reqOutStr
         };
       });
+
+      // Handle custom local-timezone date filtering
+      if (filterDate) {
+         processed = processed.filter(p => {
+             const store = currentStores.find(s => s.id === p.store_id);
+             const storeTz = store?.timezone_id || getStoreTimezone(store?.province);
+             const localDtStr = getZonedDateStr(new Date(p.clock_in), storeTz);
+             return localDtStr === filterDate;
+         });
+         totalHours = processed.reduce((sum, p) => sum + (p.calculated_hours || 0), 0);
+      }
 
       setAllPunches(processed);
       setFilteredHours(totalHours);
@@ -293,19 +358,22 @@ export default function MyTimecards() {
         if (companies && companies.length > 0) {
           setCompanyId(companies[0].id); 
           
-          const { data: storeData } = await supabase.from('stores').select('id, name').eq('company_id', companies[0].id);
-          if (storeData) setStores(storeData.sort((a: any, b: any) => a.name.localeCompare(b.name)));
+          // GRAB TIMEZONE_ID AND PROVINCE
+          const { data: storeData } = await supabase.from('stores').select('id, name, timezone_id, province').eq('company_id', companies[0].id);
+          const mappedStores = storeData ? storeData.sort((a: any, b: any) => a.name.localeCompare(b.name)) : [];
+          setStores(mappedStores);
 
           const { data: empData } = await supabase.from('employees').select('id, first_name, last_name, company_id').eq('user_id', user.id).limit(1);
           if (empData && empData.length > 0) {
             setEmployee(empData[0]);
             
-            if (cachedStore && storeData?.some((s: any) => s.id === cachedStore)) {
-              const sName = storeData.find((s: any) => s.id === cachedStore)?.name;
+            if (cachedStore && mappedStores.some(s => s.id === cachedStore)) {
+              const sName = mappedStores.find(s => s.id === cachedStore)?.name;
               if (sName) setFilterStore(sName);
             }
 
-            await fetchTimecards(empData[0].id, companies[0].id);
+            // PASS MAPPED STORES DIRECTLY TO AVOID STALE STATE
+            await fetchTimecards(empData[0].id, companies[0].id, mappedStores);
           }
 
           // Auto Logout check
@@ -366,19 +434,21 @@ export default function MyTimecards() {
 
   // --- EDIT MODAL LOGIC ---
   const openEditModal = (punch: TimePunch) => {
+    const store = stores.find(s => s.id === punch.store_id);
+    const storeTz = store?.timezone_id || getStoreTimezone(store?.province);
     const isPending = punch.status === "Pending Edit";
     
     const targetIn = isPending ? (punch.req_clock_in || punch.clock_in) : punch.clock_in;
     const targetOut = isPending ? (punch.req_clock_out || punch.clock_out) : punch.clock_out;
     
-    setEditIn(toDatetimeLocal(targetIn));
+    setEditIn(getStoreDatetimeLocal(targetIn, storeTz));
     
     if (!targetOut && targetIn) {
        const dt = new Date(targetIn);
        dt.setHours(dt.getHours() + 8);
-       setEditOut(toDatetimeLocal(dt.toISOString()));
+       setEditOut(getStoreDatetimeLocal(dt.toISOString(), storeTz));
     } else {
-       setEditOut(toDatetimeLocal(targetOut));
+       setEditOut(getStoreDatetimeLocal(targetOut, storeTz));
     }
     
     setEditNotes(punch.req_notes || "");
@@ -403,9 +473,10 @@ export default function MyTimecards() {
   };
 
   const handleAddBreak = () => {
-    // Extract strictly the local date string from editIn (e.g. "2026-03-29") to prevent UTC bleed
-    const baseDate = editIn ? editIn.split('T')[0] : toDatetimeLocal(new Date().toISOString()).split('T')[0];
-    const defaultTime = `${baseDate}T12:00`;
+    const store = editModalPunch ? stores.find(s => s.id === editModalPunch.store_id) : null;
+    const activeStoreTz = store?.timezone_id || getStoreTimezone(store?.province);
+    const baseDate = editIn ? editIn.split('T')[0] : getStoreDatetimeLocal(new Date().toISOString(), activeStoreTz).split('T')[0];
+    const defaultTime = `${baseDate}T12:00`; // Local string representation
     
     const newB: TimeBreak = {
       id: `tcb_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
@@ -413,8 +484,8 @@ export default function MyTimecards() {
       break_start: "",
       break_end: "",
       break_type: "Unpaid",
-      req_break_start: fromDatetimeLocal(defaultTime),
-      req_break_end: fromDatetimeLocal(defaultTime),
+      req_break_start: parseStoreDatetimeLocal(defaultTime, activeStoreTz),
+      req_break_end: parseStoreDatetimeLocal(defaultTime, activeStoreTz),
       req_break_type: "Unpaid",
       is_new: true
     };
@@ -423,10 +494,13 @@ export default function MyTimecards() {
 
   // --- Dynamic Changes Checker ---
   let hasChanges = false;
+  const checkerStore = editModalPunch ? stores.find(s => s.id === editModalPunch.store_id) : null;
+  const activeStoreTz = checkerStore?.timezone_id || getStoreTimezone(checkerStore?.province);
+
   if (editModalPunch) {
     const isPending = editModalPunch.status === "Pending Edit";
-    const origIn = toDatetimeLocal(isPending ? (editModalPunch.req_clock_in || editModalPunch.clock_in) : editModalPunch.clock_in);
-    const origOut = toDatetimeLocal(isPending ? (editModalPunch.req_clock_out || editModalPunch.clock_out) : editModalPunch.clock_out);
+    const origIn = getStoreDatetimeLocal(isPending ? (editModalPunch.req_clock_in || editModalPunch.clock_in) : editModalPunch.clock_in, activeStoreTz);
+    const origOut = getStoreDatetimeLocal(isPending ? (editModalPunch.req_clock_out || editModalPunch.clock_out) : editModalPunch.clock_out, activeStoreTz);
     const origNotes = editModalPunch.req_notes || "";
 
     if (editIn !== origIn || editOut !== origOut || editNotes !== origNotes) {
@@ -437,11 +511,11 @@ export default function MyTimecards() {
       for (let i = 0; i < editBreaks.length; i++) {
         const b = editBreaks[i];
         const origB = editModalPunch.breaks[i];
-        const oS = toDatetimeLocal(isPending ? (origB.req_break_start || origB.break_start) : origB.break_start);
-        const oE = toDatetimeLocal(isPending ? (origB.req_break_end || origB.break_end) : origB.break_end);
+        const oS = getStoreDatetimeLocal(isPending ? (origB.req_break_start || origB.break_start) : origB.break_start, activeStoreTz);
+        const oE = getStoreDatetimeLocal(isPending ? (origB.req_break_end || origB.break_end) : origB.break_end, activeStoreTz);
         const oType = isPending ? (origB.req_break_type || origB.break_type) : origB.break_type;
 
-        if (toDatetimeLocal(b.req_break_start || "") !== oS || toDatetimeLocal(b.req_break_end || "") !== oE || b.req_break_type !== oType || b.is_new) {
+        if (getStoreDatetimeLocal(b.req_break_start || null, activeStoreTz) !== oS || getStoreDatetimeLocal(b.req_break_end || null, activeStoreTz) !== oE || b.req_break_type !== oType || b.is_new) {
           hasChanges = true;
           break;
         }
@@ -457,10 +531,11 @@ export default function MyTimecards() {
       return;
     }
 
-    const isoIn = fromDatetimeLocal(editIn);
-    const isoOut = fromDatetimeLocal(editOut);
+    const isoIn = parseStoreDatetimeLocal(editIn, activeStoreTz);
+    const isoOut = parseStoreDatetimeLocal(editOut, activeStoreTz);
 
     if (isoIn && isoOut && new Date(isoOut) < new Date(isoIn)) {
+
       setFeedbackModal({ type: "error", title: "Invalid Times", message: "Clock Out cannot be before Clock In." });
       return;
     }
@@ -613,10 +688,10 @@ export default function MyTimecards() {
                          <label className="block text-xs text-gray-500 mb-1">Start</label>
                          <input 
                            type="datetime-local" 
-                           value={toDatetimeLocal(b.req_break_start || "")}
+                           value={getStoreDatetimeLocal(b.req_break_start || null, activeStoreTz)}
                            onChange={(e) => {
                              const copy = [...editBreaks];
-                             copy[i].req_break_start = fromDatetimeLocal(e.target.value);
+                             copy[i].req_break_start = parseStoreDatetimeLocal(e.target.value, activeStoreTz);
                              setEditBreaks(copy);
                            }}
                            className="w-full bg-[#131b26] border border-gray-700 rounded p-2 text-white text-sm" 
@@ -626,10 +701,10 @@ export default function MyTimecards() {
                          <label className="block text-xs text-gray-500 mb-1">End</label>
                          <input 
                            type="datetime-local" 
-                           value={toDatetimeLocal(b.req_break_end || "")}
+                           value={getStoreDatetimeLocal(b.req_break_end || null, activeStoreTz)}
                            onChange={(e) => {
                              const copy = [...editBreaks];
-                             copy[i].req_break_end = fromDatetimeLocal(e.target.value);
+                             copy[i].req_break_end = parseStoreDatetimeLocal(e.target.value, activeStoreTz);
                              setEditBreaks(copy);
                            }}
                            className="w-full bg-[#131b26] border border-gray-700 rounded p-2 text-white text-sm" 

@@ -12,6 +12,7 @@ import DashboardModule from "./DashboardModule";
 import SalesModule from "./SalesModule"; 
 import CashManagementModule from "./CashManagementModule";
 import OpenCloseModule from "./OpenCloseModule";
+import InventoryModule from "./InventoryModule";
 
 interface User {
   id: string;
@@ -189,6 +190,17 @@ export default function POSDashboard() {
             Sales
           </button>
 
+          <button 
+            onClick={() => setActiveModule("Inventory")}
+            style={{ 
+              backgroundColor: activeModule === 'Inventory' ? '#2a2a2a' : 'transparent',
+              color: activeModule === 'Inventory' ? themeColor : '#e5e7eb'
+            }}
+            className="w-full text-left px-6 py-3.5 text-[15px] font-bold transition-colors hover:bg-[#2a2a2a]"
+          >
+            Inventory
+          </button>
+
         </div>
 
         <div className="space-y-1 pb-4 pt-2 border-t border-gray-800">
@@ -256,6 +268,15 @@ export default function POSDashboard() {
                 setRefundData(data);
                 setActiveModule("Sell");
               }}
+            />
+          )}
+
+          {activeModule === "Inventory" && (
+            <InventoryModule 
+              companyId={companyId} 
+              storeId={storeId} 
+              themeColor={themeColor} 
+              setActiveModule={setActiveModule}
             />
           )}
 

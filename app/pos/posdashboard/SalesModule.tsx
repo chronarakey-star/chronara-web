@@ -45,11 +45,6 @@ interface SaleItem {
   ingredients_snapshot: string | null;
 }
 
-interface SalePayment {
-  id: number;
-  method: string;
-  amount: number;
-}
 
 interface SalePayment {
   id: number;
@@ -58,6 +53,22 @@ interface SalePayment {
   payment_ref: string | null;
 }
 
+
+// --- TIMEZONE HELPER ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
 
 // NEW HELPER FUNCTION TO ADD ABOVE COMPONENT
 const getItemSurcharge = (item: any) => {
@@ -130,8 +141,10 @@ const printWebReceipt = (receiptData: any, configJson: any) => {
         html += `<div style="margin-bottom: 5px;"></div>`;
     }
 
+    // --- TIMEZONE RECEIPT FIX ---
     html += `
             <div class="center">Date: ${receiptData.date}</div>
+            <div class="center">${receiptData.time}</div>
             <div class="center">Invoice #: ${String(receiptData.sale_id).slice(-6)}</div>
             <div class="center">Served by: ${receiptData.cashier}</div>
             ${receiptData.customer && receiptData.customer !== 'Guest' ? `<div class="center">Customer: ${receiptData.customer}</div>` : ''}
@@ -342,7 +355,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   const [salePayments, setSalePayments] = useState<SalePayment[]>([]);
   const [linkedRefunds, setLinkedRefunds] = useState<Sale[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
-
+  const [gcUsedLock, setGcUsedLock] = useState(false);
   // --- INITIALIZATION ---
   const isInitialMount = useRef(true);
 
@@ -453,13 +466,15 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
         calcSubtotal += lineVal; // <-- THE FIX: Removed Math.max(0, ...)
     });
 
-    // Format the SQLite datetime string to match Python's output
-    const saleDate = new Date(selectedSale.date.replace(" ", "T"));
-    const formattedDate = saleDate.toLocaleDateString('en-US', { month: 'long', day: '2-digit', year: 'numeric' });
+    // --- THE FIX: TIMEZONE PROJECTION FOR RECEIPT ---
+    const storeProv = (storeProvMap[selectedSale.store_id] || rawConfig?.province || "ON").toUpperCase();
+    const localTz = getStoreTimezone(storeProv, storeId === "ALL_STORES");
+    
+    const saleDateObj = new Date(selectedSale.date);
+    const localDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(saleDateObj);
+    const localTimeStr = new Intl.DateTimeFormat('en-US', { timeZone: localTz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(saleDateObj);
 
     // --- NEW: RECONSTRUCT TAX BREAKDOWN LABELS ---
-    const storeProv = (storeProvMap[selectedSale.store_id] || rawConfig?.province || "ON").toUpperCase();
-    
     let fedLabel = "GST";
     let provLabel = "PST";
     
@@ -490,7 +505,8 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
     const receiptData = {
         companyName: rawConfig?.companyName || "Our Store",
         sale_id: selectedSale.id,
-        date: formattedDate,
+        date: localDateStr,
+        time: localTimeStr, // <--- INJECTED LOCAL TIME
         cashier: userMap[selectedSale.user_id] || selectedSale.user_id || "System",
         customer: selectedSale.customer || "Guest",
         items: formattedItems,
@@ -508,6 +524,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
     printWebReceipt(receiptData, rawConfig);
   };
+
   // ==========================================
   // --- NEW: THE 3-SECOND CLOUD HEARTBEAT ---
   // ==========================================
@@ -601,6 +618,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
     setSaleItems([]);
     setSalePayments([]);
     setLinkedRefunds([]);
+    setGcUsedLock(false);
 
     try {
       // 1. Fetch Items (Active Filtering)
@@ -609,7 +627,27 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
         .select("*")
         .eq("sale_id", sale.id)
         .neq("is_deleted", true);
-      if (items) setSaleItems(items);
+
+      let isGcUsed = false;
+      if (items) {
+        setSaleItems(items);
+        
+        // 1.5 Check for used Gift Cards to lock refunds
+        for (const item of items) {
+            if (item.sku === 'SYS_GIFT_CARD' || item.sku?.toLowerCase().includes('gift card')) {
+                try {
+                    const snap = JSON.parse(item.ingredients_snapshot || "{}");
+                    if (snap.card_number) {
+                        const { data: gc } = await supabase.from('gift_cards').select('is_used').eq('company_id', companyId).eq('card_number', String(snap.card_number).trim()).maybeSingle();
+                        if (gc && (gc.is_used === 1 || gc.is_used === true || String(gc.is_used) === "1")) {
+                            isGcUsed = true;
+                        }
+                    }
+                } catch(e) {}
+            }
+        }
+      }
+      setGcUsedLock(isGcUsed);
 
       // 2. Fetch Payments (Active Filtering)
       const { data: payments } = await supabase
@@ -668,14 +706,8 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
     setIsDeleting(true);
     try {
-      // Use Python's exact datetime format: YYYY-MM-DD HH:MM:SS
-      const now = new Date();
-      const timestampStr = now.getFullYear() + "-" + 
-                           String(now.getMonth() + 1).padStart(2, '0') + "-" + 
-                           String(now.getDate()).padStart(2, '0') + " " + 
-                           String(now.getHours()).padStart(2, '0') + ":" + 
-                           String(now.getMinutes()).padStart(2, '0') + ":" + 
-                           String(now.getSeconds()).padStart(2, '0');
+      // --- THE FIX: STRICT UTC FOR STORAGE ---
+      const timestampStr = new Date().toISOString();
 
       // --- REVERSE GIFT CARD LOADS ---
       for (const item of saleItems) {
@@ -757,85 +789,157 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       }
 
       // 1. THE LEDGER MATH: Restock valid inventory (The Supabase DB trigger handles updating the product quantities now)
+
       const inventoryRecords: any[] = [];
 
+
       saleItems.forEach((item) => {
+
         const isTip = item.sku === 'SYS_TIP' || item.name?.toLowerCase().includes('tip');
+
         const isGiftCard = item.sku === 'SYS_GIFT_CARD' || item.name?.toLowerCase().includes('gift card');
+
 
         if (item.is_damaged || isTip || isGiftCard) return;
 
+
         const qtyToRestore = item.qty;
 
+
         if (qtyToRestore !== 0) {
+
           let parsedIngredients = [];
+
           if (item.ingredients_snapshot) {
+
             try {
+
               const snap = JSON.parse(item.ingredients_snapshot);
+
               parsedIngredients = snap.ingredients || [];
+
             } catch (e) {}
+
           }
+
 
           if (parsedIngredients.length > 0) {
+
             parsedIngredients.forEach((ing: any) => {
+
               if (ing.is_damaged) return; 
 
+
               const ingSku = ing.sku || ing.child_sku;
+
               const ingQtyToRestore = qtyToRestore * parseFloat(ing.current_qty || 0);
 
+
               if (ingQtyToRestore !== 0) {
+
                 inventoryRecords.push({
-                  // THE FIX: Deterministic ID based on Sale ID and SKU
-                  id: `RES_${selectedSale.id}_${ingSku}`,
+
+                  // THE FIX: Deterministic ID using Sale Item ID instead of just SKU
+
+                  id: `RES_${item.id}_${ingSku}`,
+
                   company_id: companyId,
+
                   store_id: selectedSale.store_id || null,
+
                   product_id: null,
+
                   sku: ingSku,
+
                   qty_change: ingQtyToRestore,
+
                   action_type: "Delete Sale",
+
                   timestamp: timestampStr,
+
                   created_at: timestampStr
+
                 });
+
               }
+
             });
+
           } else {
+
             inventoryRecords.push({
-              // THE FIX: Deterministic ID based on Sale ID and SKU
-              id: `RES_${selectedSale.id}_${item.sku || item.product_id}`,
+
+              // THE FIX: Deterministic ID using Sale Item ID instead of just SKU
+
+              id: `RES_${item.id}_${item.sku || item.product_id}`,
+
               company_id: companyId,
+
               store_id: selectedSale.store_id || null,
+
               product_id: item.product_id || null,
+
               sku: item.sku || null,
+
               qty_change: qtyToRestore,
+
               action_type: "Delete Sale",
+
               timestamp: timestampStr,
+
               created_at: timestampStr
+
             });
+
           }
+
         }
+
       });
 
+
       if (inventoryRecords.length > 0) {
+
         const { error: invError } = await supabase.from("inventory_ledger").insert(inventoryRecords);
+
         if (invError) throw new Error(`Inventory Ledger: ${invError.message}`);
+
       }
 
+
       // 2. SOFT DELETES ONLY: Update the `date` to NOW so Python's time-filter catches the deletion!
+
       await supabase.from("sale_items").update({ is_deleted: true }).eq("sale_id", selectedSale.id);
+
       await supabase.from("sale_payments").update({ is_deleted: true }).eq("sale_id", selectedSale.id);
+
       await supabase.from("tips_ledger").update({ is_deleted: true, date: timestampStr }).eq("sale_id", selectedSale.id);
+
+      await supabase.from("commissions_ledger").update({ is_deleted: true, date: timestampStr }).eq("sale_id", selectedSale.id);
+
       
+
       const { error: saleError } = await supabase.from("sales").update({ is_deleted: true, date: timestampStr }).eq("id", selectedSale.id);
+
       if (saleError) throw new Error(`Sales Table: ${saleError.message}`);
 
+
       setSelectedSale(null);
+
       fetchSales(page);
+
     } catch (err: any) {
+
       console.error("Error deleting sale", err);
+
       alert(`Failed to delete sale: ${err.message}`);
+
     } finally {
+
       setIsDeleting(false);
+
     }
+
   };
 
   const handleRefund = () => {
@@ -863,6 +967,27 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
     if (item.disc_type === "%") lineRaw -= lineRaw * (item.disc_val / 100);
     else if (item.disc_type === "$") lineRaw -= item.disc_val;
     return lineRaw;
+  };
+
+  // --- THE FIX: Display Timezone Converter ---
+  const getLocalDisplayTime = (utcString: string, saleStoreId: string) => {
+      if (!utcString) return "Unknown";
+      try {
+          const prov = storeProvMap[saleStoreId] || rawConfig?.province || "ON";
+          const localTz = getStoreTimezone(prov, storeId === "ALL_STORES");
+          const d = new Date(utcString);
+          return d.toLocaleString('en-US', {
+              timeZone: localTz,
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit'
+          });
+      } catch (e) {
+          return utcString;
+      }
   };
 
   // --- UI RENDER ---
@@ -974,7 +1099,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                   className="flex items-center p-4 border-b border-gray-800 hover:bg-[#222222] transition-colors group cursor-pointer"
                 >
                   <div className="w-[120px] font-bold text-gray-300 group-hover:text-white">{formatId(sale.id)}</div>
-                  <div className="w-[180px] text-[14px] text-gray-300">{sale.date}</div>
+                  <div className="w-[180px] text-[13px] text-gray-300">{getLocalDisplayTime(sale.date, sale.store_id)}</div>
                   <div className="w-[120px] text-[14px] text-gray-300 truncate pr-4">{userMap[sale.user_id] || (sale.user_id === user?.id ? user?.username : sale.user_id) || "System"}</div>
                   <div className="w-[150px] text-[14px] text-gray-300 truncate pr-4">{storeMap[sale.store_id] || sale.store_id || "Main Store"}</div>
                   <div className="flex-1 text-[14px] text-gray-200 font-medium truncate pr-4">{sale.customer || "Guest"}</div>
@@ -1120,7 +1245,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
               <div className="p-6 pb-2 flex justify-between items-start">
                 <div>
                   <h2 className="text-[28px] font-bold text-white">Sale {formatId(selectedSale.id)}</h2>
-                  <p className="text-gray-400 text-sm mt-1">{selectedSale.date}</p>
+                  <p className="text-gray-400 text-sm mt-1">{getLocalDisplayTime(selectedSale.date, selectedSale.store_id)}</p>
                 </div>
                 <button onClick={() => setSelectedSale(null)} className="text-gray-500 hover:text-[#C92C2C] text-2xl font-bold px-2 transition-colors">✕</button>
               </div>
@@ -1195,26 +1320,30 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                     >
                       Print Receipt
                     </button>
-                    <button
-                      onClick={handleDeleteSale}
-                      disabled={isDeleting}
-                      className={`flex-1 py-4 border border-[#C92C2C] text-[#C92C2C] rounded font-bold transition-colors uppercase tracking-wider ${isDeleting ? 'opacity-50 cursor-not-allowed' : 'hover:bg-[#3a1010]'}`}
-                    >
-                      {isDeleting ? "Deleting..." : "Delete"}
-                    </button>
 
-                    {/* Logic lock for Refunds */}
-                    {selectedSale.total < 0 || selectedSale.is_refund_of ? (
-                      <button disabled className="flex-1 py-4 bg-gray-800 text-gray-500 rounded font-bold uppercase tracking-wider cursor-not-allowed">
-                        REFUND LOCKED
-                      </button>
+                    {/* --- THE FIX: ROUTE BETWEEN REFUNDS AND UNDOS --- */}
+                    {selectedSale.total < -0.01 ? (
+                        // It's a refund record -> Show Undo
+                        <button
+                          onClick={handleDeleteSale}
+                          className="flex-1 py-4 bg-transparent border border-[#C92C2C] text-[#C92C2C] hover:bg-[#C92C2C]/10 rounded font-bold uppercase tracking-wider transition-colors shadow-lg"
+                        >
+                          {isDeleting ? "PROCESSING..." : "UNDO REFUND"}
+                        </button>
                     ) : (
-                      <button
-                        onClick={handleRefund}
-                        className="flex-1 py-4 bg-[#C92C2C] hover:bg-[#8a1c1c] text-white rounded font-bold uppercase tracking-wider transition-colors shadow-lg"
-                      >
-                        REFUND
-                      </button>
+                        // It's a sale record -> Show Refund logic
+                        gcUsedLock || saleItems.filter(i => i.qty > 0 && (!String(i.sku || '').startsWith('SYS_') || i.price > 0)).length === 0 ? (
+                          <button disabled className="flex-1 py-4 bg-gray-800 text-gray-500 rounded font-bold uppercase tracking-wider cursor-not-allowed">
+                            REFUND LOCKED
+                          </button>
+                        ) : (
+                          <button
+                            onClick={handleRefund}
+                            className="flex-1 py-4 bg-[#C92C2C] hover:bg-[#8a1c1c] text-white rounded font-bold uppercase tracking-wider transition-colors shadow-lg"
+                          >
+                            REFUND
+                          </button>
+                        )
                     )}
                  </div>
               </div>
@@ -1225,7 +1354,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
               <div className="w-[300px] bg-[#1a1a1a] border-l border-gray-800 flex flex-col h-full shrink-0">
                 <div className="p-6 border-b border-gray-800">
                   <h2 style={{ color: themeColor }} className="text-[18px] font-bold tracking-wide leading-tight mb-2">Linked Refunds / Exchanges</h2>
-                  <p className="text-gray-500 text-[12px] leading-snug">To delete this sale, you must delete the child refunds below first.</p>
+                  <p className="text-gray-500 text-[12px] leading-snug">This transaction has child refunds linked below.</p>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 scrollbar-hide">
                   {linkedRefunds.map(ref => (
@@ -1234,12 +1363,13 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                         <span className="font-bold text-white">{formatId(ref.id)}</span>
                         <span className="font-bold text-[#C92C2C] text-[15px]">${ref.total.toFixed(2)}</span>
                       </div>
-                      <p className="text-gray-500 text-[12px] mb-3">{ref.date}</p>
+                      <p className="text-gray-500 text-[11px] mb-3">{getLocalDisplayTime(ref.date, ref.store_id)}</p>
                       <button
                         onClick={() => openSaleDetails(ref)} // Deep link into the child
-                        className="w-full py-2 bg-[#C92C2C] hover:bg-[#8a1c1c] text-white rounded font-bold text-[12px] uppercase transition-colors"
+                        style={{ backgroundColor: themeColor }}
+                        className="w-full py-2 text-white rounded font-bold text-[12px] uppercase transition-colors hover:brightness-110"
                       >
-                        VIEW / DELETE
+                        VIEW
                       </button>
                     </div>
                   ))}

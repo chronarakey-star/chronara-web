@@ -24,8 +24,23 @@ interface CashDrop {
   notes: string;
 }
 
+// --- TIMEZONE HELPERS ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
 export default function CashManagementModule({ companyId, storeId, themeColor, user, setActiveModule }: CashManagementProps) {
-  // --- STATE ---
   // --- STATE ---
   const [drops, setDrops] = useState<CashDrop[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -41,6 +56,8 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
   // Users Map (for dropdown)
   const [userMap, setUserMap] = useState<string[]>([]);
+  const [storeProvMap, setStoreProvMap] = useState<Record<string, string>>({}); // Tracks provinces
+  const [defaultProv, setDefaultProv] = useState("ON");
 
   // Modal State
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -58,9 +75,30 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
   useEffect(() => { isStoreOpenRef.current = isStoreOpen; }, [isStoreOpen]);
 
+  // --- LOCAL TIME FORMATTER ---
+  const getLocalDisplayTime = (utcString: string, dropStoreId: string) => {
+      if (!utcString) return "Unknown";
+      try {
+          const prov = storeProvMap[dropStoreId] || defaultProv || "ON";
+          const localTz = getStoreTimezone(prov, storeId === "ALL_STORES");
+          const d = new Date(utcString);
+          return d.toLocaleString('en-US', {
+              timeZone: localTz,
+              month: 'short',
+              day: 'numeric',
+              year: 'numeric',
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit'
+          });
+      } catch (e) {
+          return utcString;
+      }
+  };
+
   // --- INITIALIZATION ---
   useEffect(() => {
-    fetchUsers();
+    fetchLookups();
     checkStoreStatus();
   }, [companyId, storeId]);
 
@@ -165,21 +203,31 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
     return () => clearInterval(intervalId);
   }, [companyId, storeId, page, filterType, filterUser, filterDate, searchQuery]);
   // ==========================================
+  
   // --- DATA FETCHING ---
-  const fetchUsers = async () => {
+  const fetchLookups = async () => {
     if (!companyId) return;
     try {
-      const { data } = await supabase
-        .from("users")
-        .select("username")
-        .eq("company_id", companyId);
-      
-      if (data) {
-        const uniqueUsers = Array.from(new Set(data.map(u => u.username).filter(Boolean))).sort();
+      // 1. Fetch default province
+      const { data: compData } = await supabase.from('companies').select('province').eq('id', companyId).maybeSingle();
+      if (compData && compData.province) setDefaultProv(compData.province);
+
+      // 2. Fetch stores for province mapping
+      const { data: stores } = await supabase.from("stores").select("id, province").eq("company_id", companyId);
+      const pMap: Record<string, string> = {}; 
+      stores?.forEach((s) => {
+          if (s.province) pMap[s.id] = s.province;
+      });
+      setStoreProvMap(pMap);
+
+      // 3. Fetch users
+      const { data: users } = await supabase.from("users").select("username").eq("company_id", companyId);
+      if (users) {
+        const uniqueUsers = Array.from(new Set(users.map(u => u.username).filter(Boolean))).sort();
         setUserMap(uniqueUsers);
       }
     } catch (err) {
-      console.error("Error fetching users", err);
+      console.error("Error fetching lookups", err);
     }
   };
 
@@ -213,9 +261,12 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
       // Date Filter
       if (filterDate) {
-        query = query.like("date", `${filterDate}%`);
+        // Convert the local selected date into strict UTC boundaries to catch all offset drops
+        const startOfDay = new Date(`${filterDate}T00:00:00`).toISOString();
+        const endOfDay = new Date(`${filterDate}T23:59:59.999`).toISOString();
+        
+        query = query.gte("date", startOfDay).lte("date", endOfDay);
       }
-
       // Search Query
       if (searchQuery.trim()) {
         const wild = `%${searchQuery.trim()}%`;
@@ -295,14 +346,9 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
     const finalAmount = actionType === "Add Cash" ? amountVal : -amountVal;
 
     try {
+      // --- STRICT UTC RULE ---
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, "0");
-      const day = String(now.getDate()).padStart(2, "0");
-      const hours = String(now.getHours()).padStart(2, "0");
-      const mins = String(now.getMinutes()).padStart(2, "0");
-      const secs = String(now.getSeconds()).padStart(2, "0");
-      const dateStr = `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
+      const dateStr = now.toISOString(); 
       const unixTs = Math.floor(now.getTime() / 1000);
 
       const targetStoreId = storeId === "ALL_STORES" ? null : storeId;
@@ -326,7 +372,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
         await logActivity(
           actionType,
           `Updated Cash: ${finalAmount.toFixed(2)} (${actionType})`,
-          dateStr.split(" ")[0]
+          dateStr.split("T")[0] // Split on T for standard date formats
         );
       } else {
         // INSERT
@@ -351,7 +397,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
         await logActivity(
           actionType,
           `New Cash: ${finalAmount.toFixed(2)} (${actionType})`,
-          dateStr.split(" ")[0]
+          dateStr.split("T")[0]
         );
       }
 
@@ -371,16 +417,9 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
     setIsSaving(true);
     try {
-      // 1. Generate current timestamps
+      // --- STRICT UTC RULE ---
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, "0");
-      const day = String(now.getDate()).padStart(2, "0");
-      const hours = String(now.getHours()).padStart(2, "0");
-      const mins = String(now.getMinutes()).padStart(2, "0");
-      const secs = String(now.getSeconds()).padStart(2, "0");
-      
-      const dateStr = `${year}-${month}-${day} ${hours}:${mins}:${secs}`;
+      const dateStr = now.toISOString();
       const unixTs = Math.floor(now.getTime() / 1000);
 
       // 2. THE FIX: Soft delete AND bump the timestamp forward so Python catches it!
@@ -395,7 +434,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
       await logActivity(
         "Delete Cash Log",
         `Deleted record amount: ${editRecord.total.toFixed(2)}`,
-        dateStr.split(" ")[0]
+        dateStr.split("T")[0]
       );
 
       closeModal();
@@ -407,6 +446,8 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
       setIsSaving(false);
     }
   };
+
+  
 
   const logActivity = async (action: string, description: string, dateStr: string) => {
     try {
@@ -570,7 +611,9 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
                     key={drop.id}
                     className="flex items-center p-4 border-b border-gray-800 hover:bg-[#222222] transition-colors group"
                   >
-                    <div className="w-[200px] text-[14px] text-gray-300">{drop.date}</div>
+                    {/* --- THE FIX: Projected Local Time --- */}
+                    <div className="w-[200px] text-[14px] text-gray-300">{getLocalDisplayTime(drop.date, drop.store_id)}</div>
+                    
                     <div className="w-[120px] text-[14px] text-gray-300">{drop.type}</div>
                     <div className="w-[150px] text-[14px] text-gray-300 truncate pr-4">{drop.user || "Unknown"}</div>
                     <div className="flex-1 text-[14px] text-gray-200 font-medium truncate pr-4">{drop.notes}</div>

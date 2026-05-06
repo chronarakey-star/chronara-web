@@ -15,29 +15,46 @@ interface SellModuleProps {
 }
 
 interface CartItem {
-  line_id: string;
-  id: string;
-  sku: string;
-  name: string;
-  price: number;
-  qty: number;
-  disc_type: "%" | "$" | null;
-  disc_val: number;
-  tax_code: string;
-  prov_tax_code: string;
-  is_tip?: boolean;
-  is_gift_card?: boolean;
-  card_number?: string;
-  ingredients?: any[];
+  line_id: string;
+  id: string;
+  sku: string;
+  name: string;
+  price: number;
+  cost: number; // <--- NEW: Track item cost for COGS
+  qty: number;
+  disc_type: "%" | "$" | null;
+  disc_val: number;
+  tax_code: string;
+  prov_tax_code: string;
+  item_commission?: number; 
+  is_tip?: boolean;
+  is_gift_card?: boolean;
+  card_number?: string;
+  ingredients?: any[];
 }
 
-// NEW HELPER FUNCTION TO ADD ABOVE COMPONENT
+// --- TIMEZONE HELPER ---
+const getStoreTimezone = (province: string, isAllStores: boolean) => {
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+    const map: Record<string, string> = {
+        'BC': 'America/Vancouver',
+        'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
+        'SK': 'America/Regina',
+        'MB': 'America/Winnipeg',
+        'ON': 'America/Toronto', 'QC': 'America/Toronto', 'NU': 'America/Toronto',
+        'NB': 'America/Halifax', 'NS': 'America/Halifax', 'PE': 'America/Halifax',
+        'NL': 'America/St_Johns',
+        'YT': 'America/Whitehorse'
+    };
+    return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
+};
+
 const getItemSurcharge = (item: CartItem) => {
-    if (!item.ingredients) return 0;
-    return item.ingredients.reduce((sum, ing) => {
-        const diff = ing.current_qty - ing.base_qty;
-        return diff > 0 && ing.extra_cost > 0 ? sum + (diff * ing.extra_cost) : sum;
-    }, 0);
+    if (!item.ingredients) return 0;
+    return item.ingredients.reduce((sum, ing) => {
+        const diff = ing.current_qty - ing.base_qty;
+        return diff > 0 && ing.extra_cost > 0 ? sum + (diff * ing.extra_cost) : sum;
+    }, 0);
 };
 
 
@@ -109,8 +126,10 @@ const printWebReceipt = (receiptData: any, configJson: any) => {
         html += `<div style="margin-bottom: 5px;"></div>`;
     }
 
+    // --- TIMEZONE RECEIPT FIX ---
     html += `
-            <div class="center">Date: ${receiptData.date}</div>
+            <div class="center">${receiptData.date}</div>
+            <div class="center">${receiptData.time}</div>
             <div class="center">Invoice #: ${String(receiptData.sale_id).slice(-6)}</div>
             <div class="center">Served by: ${receiptData.cashier}</div>
             ${receiptData.customer && receiptData.customer !== 'Guest' ? `<div class="center">Customer: ${receiptData.customer}</div>` : ''}
@@ -119,6 +138,7 @@ const printWebReceipt = (receiptData: any, configJson: any) => {
             <div class="flex bold"><span>ITEM</span><span>AMOUNT</span></div>
             <div class="solid-divider"></div>
     `;
+
 
     let discountableSub = 0.0;
 
@@ -295,9 +315,13 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   const [refundIngredientShrinkageIds, setRefundIngredientShrinkageIds] = useState<Set<string>>(new Set());
 
   // Settings State (Now wired to fetch from DB)
-  const [acceptTips, setAcceptTips] = useState(true); 
-  const [acceptGiftCards, setAcceptGiftCards] = useState(true);
-  const [paymentMethods, setPaymentMethods] = useState<string[]>(["Cash", "Debit", "Visa", "Mastercard"]);
+  const [acceptTips, setAcceptTips] = useState(true); 
+  const [acceptGiftCards, setAcceptGiftCards] = useState(true);
+  const [autoDamagedRefunds, setAutoDamagedRefunds] = useState(false);
+  const [paymentMethods, setPaymentMethods] = useState<string[]>(["Cash", "Debit", "Visa", "Mastercard"]);
+  const [commGlobalEnabled, setCommGlobalEnabled] = useState(false); // <--- NEW
+  const [commGlobalRate, setCommGlobalRate] = useState(0); // <--- NEW
+  const [commItemEnabled, setCommItemEnabled] = useState(false); // <--- NEW
 
   // Customer State
   const [customers, setCustomers] = useState<any[]>([]);
@@ -362,6 +386,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   const [showDailySummary, setShowDailySummary] = useState(false);
   const [summaryData, setSummaryData] = useState<{ totalSales: number, openingBalance: number, userBreakdown: Record<string, number> } | null>(null);
   const [isFetchingSummary, setIsFetchingSummary] = useState(false);
+  
+  
   
   // Customer Form State
   const [custForm, setCustForm] = useState({
@@ -495,62 +521,82 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   // ==========================================
 
   // --- REFUND SESSION INITIALIZATION ---
-  useEffect(() => {
-    if (!refundData) return;
-    
-    const loadRefundSession = async () => {
-      setIsRefundMode(true);
-      
-      // 1. Fetch any previous refunds that branch from this sale
-      const { data: prevRefunds } = await supabase.from('sales').select('id, total').eq('is_refund_of', refundData.id).neq('is_deleted', true);
-      const prevTotal = prevRefunds?.reduce((sum, r) => sum + (r.total || 0), 0) || 0;
-      setOriginalSaleTotal(refundData.total + prevTotal);
+  useEffect(() => {
+    if (!refundData) return;
+    
+    const loadRefundSession = async () => {
+      setIsRefundMode(true);
+      
+      // 1. Fetch ONLY the IDs of previous refunds that branch from this sale
+      const { data: prevRefunds } = await supabase.from('sales').select('id').eq('is_refund_of', refundData.id).neq('is_deleted', true);
 
-      // 2. Aggregate previously refunded item IDs AND Ingredients
-      let refundedIds: Record<string, number> = {};
-      let refundedIngs: Record<string, number> = {}; // <--- THIS WAS THE MISSING VARIABLE!
+      // 2. Aggregate previously refunded item IDs AND Ingredients
+      let refundedIds: Record<string, number> = {};
+      let refundedIngs: Record<string, number> = {}; 
 
-      if (prevRefunds && prevRefunds.length > 0) {
-        const prevIds = prevRefunds.map(r => r.id);
-        const { data: prevItems } = await supabase.from('sale_items').select('*').in('sale_id', prevIds).neq('is_deleted', true);
-        
-        prevItems?.forEach(pi => {
-          const pid = pi.product_id || pi.sku;
-          let r_qty = Math.abs(pi.qty);
-          const r_price = Math.abs(pi.price || 0);
-          let is_pure_ing = false;
+      if (prevRefunds && prevRefunds.length > 0) {
+        const prevIds = prevRefunds.map(r => r.id);
+        const { data: prevItems } = await supabase.from('sale_items').select('*').in('sale_id', prevIds).neq('is_deleted', true);
+        
+        prevItems?.forEach(pi => {
+          let is_pure_ing = false;
 
-          // Process child ingredient refunds
-          if (pi.ingredients_snapshot) {
-              try {
-                  const snap = JSON.parse(pi.ingredients_snapshot);
-                  if (snap.is_pure_ing_refund) is_pure_ing = true;
+          if (pi.ingredients_snapshot) {
+              try {
+                  const snap = JSON.parse(pi.ingredients_snapshot);
+                  if (snap.is_pure_ing_refund) is_pure_ing = true;
+              } catch (e) {}
+          }
 
-                  snap.ingredients?.forEach((ing: any) => {
-                      const c_sku = ing.sku || ing.child_sku;
-                      if (c_sku) {
-                          const i_qty = Math.abs(r_qty * (parseFloat(ing.current_qty) || 0));
-                          if (i_qty > 0) {
-                              const key = `${pid}||${c_sku}`;
-                              refundedIngs[key] = (refundedIngs[key] || 0) + i_qty;
-                          }
-                      }
-                  });
-              } catch (e) {}
-          }
+          let r_qty_raw = parseFloat(pi.qty || 0);
 
-          // FIX: Explicitly ignore parent quantity deductions if it was an ingredient-only refund
-          if (is_pure_ing || (r_price < 0.001 && pi.ingredients_snapshot)) {
-              r_qty = 0;
-          }
+          if (r_qty_raw > 0.001 && !is_pure_ing) {
+              return;
+          }
 
-          if (pid) refundedIds[pid] = (refundedIds[pid] || 0) + r_qty;
-        });
-      }
+          let r_qty = Math.abs(r_qty_raw);
+          const r_price = Math.abs(pi.price || 0);
+          const pid = pi.product_id || pi.sku;
 
-      // 3. Build the cart delta
+          if (pi.ingredients_snapshot) {
+              try {
+                  const snap = JSON.parse(pi.ingredients_snapshot);
+                  snap.ingredients?.forEach((ing: any) => {
+                      const c_sku = ing.sku || ing.child_sku;
+                      if (c_sku) {
+                          const i_qty = Math.abs(r_qty * (parseFloat(ing.current_qty) || 0));
+                          if (i_qty > 0) {
+                              const key = `${pid}||${c_sku}`;
+                              refundedIngs[key] = (refundedIngs[key] || 0) + i_qty;
+                          }
+                      }
+                  });
+              } catch (e) {}
+          }
+
+          if (is_pure_ing || (r_price < 0.001 && pi.ingredients_snapshot)) {
+              r_qty = 0;
+          }
+
+          if (pid) refundedIds[pid] = (refundedIds[pid] || 0) + r_qty;
+        });
+      }
+
+      // 3. Fetch product configurations directly from the DB (WITH COST)
+      const validProductIds = refundData.items.map((i: any) => i.product_id).filter(Boolean);
+      let refundDbProducts: any[] = [];
+      if (validProductIds.length > 0) {
+          // --- THE FIX: Select `unit_cost` from products ---
+          const { data: pData } = await supabase.from('products').select('id, sku, tax_code, prov_tax_code, item_commission, unit_cost').in('id', validProductIds);
+          if (pData) refundDbProducts = pData;
+      }
+
+      // 4. Build the cart delta
       const initialCart: CartItem[] = [];
       const originalItems: any[] = [];
+      
+      const newRefundShrinkages = new Set<string>(); // <--- NEW
+      const newIngredientShrinkages = new Set<string>(); // <--- NEW
       
       refundData.items.forEach((item: any) => {
         const pid = item.product_id || item.sku;
@@ -563,27 +609,49 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         if (remainingQty > 0) {
           let ingredients = [];
           let basePrice = item.price || 0;
+          let loadedCardNum = "";
+          const newLineId = crypto.randomUUID(); // <--- NEW: Pre-generate ID
+          
+          const isTip = item.sku === 'SYS_TIP' || item.name?.toLowerCase().includes('tip');
+          const isGiftCard = item.sku === 'SYS_GIFT_CARD' || item.name?.toLowerCase().includes('gift card');
+          
+          // --- NEW: AUTO DAMAGE LOGIC ---
+          let isLockedGc = false;
+          try {
+             if (item.ingredients_snapshot) {
+                 const snap = JSON.parse(item.ingredients_snapshot);
+                 if (snap.is_locked_gc || snap.is_used) isLockedGc = true;
+             }
+          } catch(e) {}
+          
+          if (autoDamagedRefunds && !isLockedGc && !isGiftCard && !isTip) {
+              newRefundShrinkages.add(newLineId);
+          }
           
           try {
               if (item.ingredients_snapshot) {
                  const snap = JSON.parse(item.ingredients_snapshot);
-                 
                  if (snap.base_price !== undefined) {
                      basePrice = parseFloat(snap.base_price);
                  }
+                 if (snap.card_number !== undefined) {
+                     loadedCardNum = snap.card_number;
+                 }
 
-                 // Apply ingredient-specific reductions
                  const origParentQty = item.qty;
                  ingredients = (snap.ingredients || []).map((ing: any) => {
                      const c_sku = ing.sku || ing.child_sku;
                      const key = `${pid}||${c_sku}`;
-                     
                      const origIngQty = parseFloat(ing.current_qty) || 0;
                      const totalOrigIng = origIngQty * origParentQty;
                      const ingRefunded = refundedIngs[key] || 0;
 
                      let totalRemainingIng = totalOrigIng - ingRefunded;
                      if (totalRemainingIng < 0) totalRemainingIng = 0;
+
+                     if (autoDamagedRefunds && !isLockedGc && !isGiftCard && !isTip) {
+                         newIngredientShrinkages.add(`${newLineId}:${c_sku}`);
+                     }
 
                      return {
                          ...ing,
@@ -593,23 +661,25 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
               }
           } catch(e) {}
 
-          // Lookup the product to retain its original tax mapping intent
-          const matchedProd = products.find(p => p.id === (item.product_id || "") || p.sku === (item.sku || ""));
+          const matchedProd = refundDbProducts.find(p => p.id === item.product_id) || products.find(p => p.id === (item.product_id || "") || p.sku === (item.sku || ""));
           const cartItem: CartItem = {
-              line_id: crypto.randomUUID(),
+              line_id: newLineId,
               id: item.product_id || "",
               sku: item.sku || "",
               name: item.name || "",
               price: basePrice,
+              // --- THE FIX: Check for unit_cost ---
+              cost: matchedProd ? parseFloat(matchedProd.unit_cost || 0) : 0.0, 
               qty: remainingQty,
               disc_type: item.disc_type as any,
               disc_val: item.disc_val || 0,
               tax_code: matchedProd?.tax_code || "HST",
               prov_tax_code: matchedProd?.prov_tax_code || "Exempt",
+              item_commission: matchedProd ? parseFloat(matchedProd.item_commission || 0) : 0, 
               ingredients: ingredients,
-              is_tip: item.sku === 'SYS_TIP' || item.name?.toLowerCase().includes('tip'),
-              is_gift_card: item.sku === 'SYS_GIFT_CARD',
-              card_number: ""
+              is_tip: isTip,
+              is_gift_card: isGiftCard,
+              card_number: loadedCardNum
           };
           initialCart.push(cartItem);
           originalItems.push(JSON.parse(JSON.stringify(cartItem))); 
@@ -617,17 +687,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       });
 
       if (initialCart.length === 0) {
-        // --- DIAGNOSTIC TEST OUTPUT FOR WEB ---
-        let debugMsg = "DIAGNOSTIC REPORT:\n\n";
-        refundData.items.forEach((i: any) => {
-            const pid = i.product_id || i.sku;
-            const orig_q = parseFloat(i.qty || 0);
-            const ref_q = refundedIds[pid] || 0.0;
-            debugMsg += `Item: ${i.name}\nOriginal Qty: ${orig_q}\nRefunded So Far: ${ref_q}\nRemaining: ${orig_q - Math.min(orig_q, ref_q)}\n\n`;
-        });
-        debugMsg += "This order has already been fully refunded.";
-        alert(debugMsg);
-
+        alert("This order has already been fully refunded.");
         if (clearRefundData) clearRefundData();
         setIsRefundMode(false);
         return;
@@ -636,14 +696,18 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       setOriginalSaleItems(originalItems);
       setCart(initialCart);
       
-      // Load Customer
+      // --- NEW: Apply the Auto-Damage sets ---
+      setRefundShrinkageIds(newRefundShrinkages);
+      setRefundIngredientShrinkageIds(newIngredientShrinkages);
+      
+      setNeedsInitialTotal(true); 
+      
       if (refundData.customer && refundData.customer !== "Guest") {
         const parts = refundData.customer.split(' ');
         setCustomer({ first_name: parts[0], last_name: parts.slice(1).join(' ') });
         setCustomerSearch(refundData.customer);
       }
       
-      // Load Discounts
       if (refundData.promo_code) {
          setPromoCodeInput(refundData.promo_code);
          setPromoDiscount({ type: refundData.promo_disc_type, val: refundData.promo_disc_val });
@@ -658,19 +722,18 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }
     };
     loadRefundSession();
-  }, [refundData]);
+  }, [refundData, autoDamagedRefunds]);
 
   // Click outside listener for Customer Dropdown
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
-        setShowCustomerDropdown(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
-
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
+        setShowCustomerDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
   // Fetch global settings from DB
   const fetchCompanySettings = async () => {
     if (!companyId) return;
@@ -705,6 +768,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
             provTaxData = fullTaxConfig[finalProv] || {};
         }
 
+        // ... (inside fetchCompanySettings)
+        
         // Dynamically convert whole numbers (e.g. 13) to decimals (0.13)
         setTaxRates({
             gst: (parseFloat(provTaxData.gst) || 0) / 100.0,
@@ -717,10 +782,16 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         });
         // -----------------------------
         
-        // If settings exist in DB, apply them. Otherwise default to true.
-        setAcceptTips(config.accept_tips ?? true);
-        setAcceptGiftCards(config.accept_gift_cards ?? true);
+        // THE FIX: Match the Python POS default behavior (False/Off by default)
+        setAcceptTips(config.accept_tips ?? false);
+        setAcceptGiftCards(config.accept_gift_cards ?? false);
+        setAutoDamagedRefunds(config[`${companyId}_auto_damaged_refunds`] ?? false); // <--- NEW
         
+        // --- NEW: Commission Config ---
+        setCommGlobalEnabled(config.comm_global_enabled || false);
+        setCommGlobalRate(parseFloat(config.comm_global_rate || 0));
+        setCommItemEnabled(config.comm_item_enabled || false);
+
         // Load dynamic payment methods synced from Python POS
         if (config.payment_methods && Array.isArray(config.payment_methods)) {
           setPaymentMethods(config.payment_methods);
@@ -732,61 +803,58 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   // --- BULLETPROOF TIP INJECTOR ---
-  useEffect(() => {
-    if (isRefundMode) return; // Lock tips in refund mode
+  useEffect(() => {
+    if (isRefundMode) return; // Lock tips in refund mode
 
-    setCart(prevCart => {
-      // FIX: Must check `prevCart` here, NOT `cart` from the outer scope!
-      const hasTip = prevCart.some(i => i.is_tip || i.sku === 'SYS_TIP');
-      
-      // If toggled off, securely strip it out
-      if (!acceptTips) {
-        return hasTip ? prevCart.filter(i => !i.is_tip && i.sku !== 'SYS_TIP') : prevCart;
-      }
-      
-      // If toggled on and missing, inject safely
-      if (!hasTip) {
-        return [...prevCart, {
-          line_id: `SYS_TIP_${crypto.randomUUID().substring(0, 8)}`,
-          id: 'SYS_TIP',
-          sku: 'SYS_TIP',
-          name: 'Tips',
-          price: 0,
-          qty: 1,
-          disc_type: null,
-          disc_val: 0,
-          tax_code: 'Exempt',
-          prov_tax_code: 'Exempt',
-          is_tip: true
-        }];
-      }
-      return prevCart;
-    });
-  }, [acceptTips, cart.length, isRefundMode]); 
+    setCart(prevCart => {
+      const hasTip = prevCart.some(i => i.is_tip || i.sku === 'SYS_TIP');
+      
+      if (!acceptTips) {
+        return hasTip ? prevCart.filter(i => !i.is_tip && i.sku !== 'SYS_TIP') : prevCart;
+      }
+      
+      if (!hasTip) {
+        return [...prevCart, {
+          line_id: `SYS_TIP_${crypto.randomUUID().substring(0, 8)}`,
+          id: 'SYS_TIP',
+          sku: 'SYS_TIP',
+          name: 'Tips',
+          price: 0,
+          cost: 0, // <--- THE FIX
+          qty: 1,
+          disc_type: null,
+          disc_val: 0,
+          tax_code: 'Exempt',
+          prov_tax_code: 'Exempt',
+          is_tip: true
+        }];
+      }
+      return prevCart;
+    });
+  }, [acceptTips, cart.length, isRefundMode]); 
 
-  const fetchProducts = async (query = searchQuery) => {
-    if (!companyId) return;
+  const fetchProducts = async (query = searchQuery) => {
+    if (!companyId) return;
 
-    try {
-      // THE FIX: Do not pull deleted products into the POS
-      let q = supabase.from('products').select('*').eq('company_id', companyId).neq('is_deleted', true);
-      
-      if (storeId && storeId !== "ALL_STORES") q = q.eq('store_id', storeId);
-      if (selectedCategories.length > 0) q = q.in('category', selectedCategories);
-      if (query) q = q.or(`name.ilike.%${query}%,sku.ilike.%${query}%`);
-      
-      const { data } = await q.limit(50);
-      if (data) {
-        setProducts(data);
-        if (categories.length === 0 && !query) {
-          const uniqueCats = Array.from(new Set(data.map(p => p.category).filter(c => c && c.trim() !== "")));
-          setCategories(uniqueCats.sort());
-        }
-      }
-    } catch (err) {
-      console.error("Failed to fetch products", err);
-    }
-  };
+    try {
+      let q = supabase.from('products').select('*').eq('company_id', companyId).neq('is_deleted', true);
+      
+      if (storeId && storeId !== "ALL_STORES") q = q.eq('store_id', storeId);
+      if (selectedCategories.length > 0) q = q.in('category', selectedCategories);
+      if (query) q = q.or(`name.ilike.%${query}%,sku.ilike.%${query}%`);
+      
+      const { data } = await q.limit(50);
+      if (data) {
+        setProducts(data);
+        if (categories.length === 0 && !query) {
+          const uniqueCats = Array.from(new Set(data.map(p => p.category).filter(c => c && c.trim() !== "")));
+          setCategories(uniqueCats.sort());
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch products", err);
+    }
+  };
 
   const fetchCustomers = async () => {
     if (!companyId) return;
@@ -803,43 +871,56 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   const fetchAndShowDailySummary = async () => {
     setIsFetchingSummary(true);
     try {
-      // 1. Format Today's Date (YYYY-MM-DD)
-      const today = new Date();
-      const year = today.getFullYear();
-      const month = String(today.getMonth() + 1).padStart(2, '0');
-      const day = String(today.getDate()).padStart(2, '0');
-      const todayStr = `${year}-${month}-${day}`;
-
       let sid = storeId === "ALL_STORES" ? null : storeId;
+      const localTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
 
-      // 2. Fetch Sales
+      // 1. Get Today's Local Date String (YYYY-MM-DD) via projection
+      const now = new Date();
+      const localTodayStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+
+      // 2. Fetch Recent Sales (Pull the last 48 hours to safely catch UTC offsets)
+      const twoDaysAgo = new Date();
+      twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
+      const twoDaysAgoUTC = twoDaysAgo.toISOString();
+
       let salesQuery = supabase.from('sales')
-        .select('id, total, user_id')
+        .select('id, total, user_id, date')
         .eq('company_id', companyId)
-        .like('date', `${todayStr}%`)
-        .neq('is_deleted', true); // <--- ADD THIS
+        .gte('date', twoDaysAgoUTC) // Greater than 48 hours ago
+        .neq('is_deleted', true);
         
       if (sid) salesQuery = salesQuery.eq('store_id', sid);
       else salesQuery = salesQuery.is('store_id', null);
 
-      const { data: salesData, error: salesError } = await salesQuery;
+      const { data: rawSalesData, error: salesError } = await salesQuery;
       if (salesError) throw salesError;
 
-      // 3. Fetch Tips (To subtract from raw totals)
+      // FILTER IN MEMORY BY PROJECTING UTC TO LOCAL TIME
+      const salesData = (rawSalesData || []).filter(s => {
+          if (!s.date) return false;
+          const sLocalStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(s.date));
+          return sLocalStr === localTodayStr;
+      });
+
+      // 3. Fetch Tips (Same logic)
       let tipsQuery = supabase.from('tips_ledger')
-        .select('sale_id, amount')
+        .select('sale_id, amount, date')
         .eq('company_id', companyId)
-        .like('date', `${todayStr}%`)
-        .neq('is_deleted', true); // <--- ADD THIS
+        .gte('date', twoDaysAgoUTC)
+        .neq('is_deleted', true);
         
       if (sid) tipsQuery = tipsQuery.eq('store_id', sid);
       else tipsQuery = tipsQuery.is('store_id', null);
 
-      const { data: tipsData } = await tipsQuery;
+      const { data: rawTipsData } = await tipsQuery;
       const tipsBySale: Record<string, number> = {};
-      if (tipsData) {
-        tipsData.forEach(t => {
-          tipsBySale[t.sale_id] = (tipsBySale[t.sale_id] || 0) + parseFloat(t.amount || 0);
+      if (rawTipsData) {
+        rawTipsData.forEach(t => {
+          if (!t.date) return;
+          const tLocalStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(t.date));
+          if (tLocalStr === localTodayStr) {
+             tipsBySale[t.sale_id] = (tipsBySale[t.sale_id] || 0) + parseFloat(t.amount || 0);
+          }
         });
       }
 
@@ -873,18 +954,23 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
 
       // 6. Fetch Opening Balance from Cash Sessions
       let openQuery = supabase.from('cash_sessions')
-        .select('total')
+        .select('total, timestamp')
         .eq('company_id', companyId)
         .eq('type', 'Open')
-        .order('timestamp', { ascending: false })
-        .limit(1);
+        .gte('timestamp', twoDaysAgoUTC)
+        .order('timestamp', { ascending: false });
         
       if (sid) openQuery = openQuery.eq('store_id', sid);
 
       const { data: openData } = await openQuery;
       let openBal = 0;
-      if (openData && openData.length > 0) {
-        openBal = parseFloat(openData[0].total || 0);
+      if (openData) {
+         const todaysOpen = openData.find(o => {
+             if (!o.timestamp) return false;
+             const oLocalStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date(o.timestamp));
+             return oLocalStr === localTodayStr;
+         });
+         if (todaysOpen) openBal = parseFloat(todaysOpen.total || 0);
       }
 
       // 7. Inject Data & Open Modal
@@ -906,22 +992,27 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     let baseTaxFed = 0;
     let baseTaxProv = 0;
 
-    // --- NEW: Calculate original cart discountable subtotal for historical tax scaling ---
+    // --- THE FIX: Calculate original cart discountable subtotal using raw refundData ---
     let origDiscountableSubtotal = 0;
-    if (isRefundMode && originalSaleItems.length > 0) {
-        originalSaleItems.forEach(item => {
-            const surcharge = getItemSurcharge(item);
-            let lineRaw = (item.price + surcharge) * item.qty;
-            if (item.disc_type === "%") lineRaw -= (lineRaw * (item.disc_val / 100));
-            else if (item.disc_type === "$") lineRaw -= item.disc_val;
-            if (!item.is_tip && !item.is_gift_card && !item.sku?.includes('SYS_')) {
+    if (isRefundMode && refundData && refundData.items) {
+        refundData.items.forEach((item: any) => {
+            // The price from the database already includes ingredient surcharges!
+            let lineRaw = parseFloat(item.price || 0) * parseFloat(item.qty || 0);
+            
+            if (item.disc_type === "%") lineRaw -= (lineRaw * (parseFloat(item.disc_val || 0) / 100));
+            else if (item.disc_type === "$") lineRaw -= parseFloat(item.disc_val || 0);
+            
+            const isTip = item.is_tip || item.sku === 'SYS_TIP' || item.name?.toLowerCase().includes('tip');
+            const isGiftCard = item.is_gift_card || item.sku === 'SYS_GIFT_CARD' || item.name?.toLowerCase().includes('gift card');
+            
+            if (!isTip && !isGiftCard && !String(item.sku || "").startsWith('SYS_')) {
                 origDiscountableSubtotal += Math.max(0, lineRaw);
             }
         });
         
         let pAmt = 0;
         const pType = refundData?.promo_disc_type;
-        const pVal = refundData?.promo_disc_val || 0;
+        const pVal = parseFloat(refundData?.promo_disc_val || 0);
         if (pType === "%") pAmt = origDiscountableSubtotal * (pVal / 100);
         else if (pType === "$") pAmt = pVal;
         
@@ -929,7 +1020,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         
         let mAmt = 0;
         const mType = refundData?.manual_disc_type;
-        const mVal = refundData?.manual_disc_val || 0;
+        const mVal = parseFloat(refundData?.manual_disc_val || 0);
         if (mType === "%") mAmt = subAfterP * (mVal / 100);
         else if (mType === "$") mAmt = Math.min(mVal, subAfterP);
         
@@ -1004,6 +1095,17 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     return { subtotal, promoAmt, manualAmt, totalDiscount, finalSubtotal, finalTax, total, origDiscountableSubtotal };
   }, [cart, promoDiscount, manualDiscount, isNativeExempt, manualTax, storeProvince, taxRates, isRefundMode, originalSaleItems, refundData]);
 
+  // --- NEW: Accurate Baseline State ---
+  const [needsInitialTotal, setNeedsInitialTotal] = useState(false);
+
+  useEffect(() => {
+      if (needsInitialTotal && isRefundMode && cart.length > 0) {
+          setOriginalSaleTotal(totals.total);
+          setNeedsInitialTotal(false);
+      }
+  }, [totals.total, needsInitialTotal, isRefundMode, cart.length]);
+  // ------------------------------------
+
   // --- CORE SYSTEM ACTIONS ---
   const voidCart = () => {
     setCart([]);
@@ -1020,6 +1122,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     setIsRefundMode(false);
     setOriginalSaleItems([]);
     setOriginalSaleTotal(0);
+    setNeedsInitialTotal(false); // <--- ADDED
     setRefundShrinkageIds(new Set());
     setRefundIngredientShrinkageIds(new Set());
     if (clearRefundData) clearRefundData();
@@ -1052,149 +1155,148 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const addToCart = async (product: any) => {
-    console.log("🛒 ADDING PRODUCT:", product); // DEBUG LOG
+    console.log("🛒 ADDING PRODUCT:", product); // DEBUG LOG
 
-    // Optimistically update or clone if it already exists to keep UI snappy
-    const existingInCart = cart.find(i => i.id === product.id);
-    if (existingInCart) {
-      if (existingInCart.ingredients && existingInCart.ingredients.length > 0) {
-        // THE FIX: It is a packaged item! Clone it as a NEW separate line item and reset ingredients to base
-        const newCartItem = {
-          ...existingInCart,
-          line_id: crypto.randomUUID(),
-          qty: 1,
-          ingredients: existingInCart.ingredients.map(ing => ({...ing, current_qty: ing.base_qty}))
-        };
-        setCart(prev => [...prev, newCartItem]);
-        return;
-      } else {
-        // It is a normal item! Optimistically increment quantity
-        setCart(prev => prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i));
-        return;
-      }
-    }
+    // Optimistically update or clone if it already exists to keep UI snappy
+    const existingInCart = cart.find(i => i.id === product.id);
+    if (existingInCart) {
+      if (existingInCart.ingredients && existingInCart.ingredients.length > 0) {
+        const newCartItem = {
+          ...existingInCart,
+          line_id: crypto.randomUUID(),
+          qty: 1,
+          ingredients: existingInCart.ingredients.map(ing => ({...ing, current_qty: ing.base_qty}))
+        };
+        setCart(prev => [...prev, newCartItem]);
+        return;
+      } else {
+        setCart(prev => prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i));
+        return;
+      }
+    }
 
-    let ingredients: any[] = [];
-    
-    // Ensure the product actually has a SKU before querying the database
-    if (product.sku) {
-        try {
-          const { data: ingData, error: ingError } = await supabase
-            .from('product_ingredients')
-            .select('*')
-            .eq('company_id', companyId)
-            .eq('parent_sku', product.sku);
+    let ingredients: any[] = [];
+    
+    if (product.sku) {
+        try {
+          const { data: ingData, error: ingError } = await supabase
+            .from('product_ingredients')
+            .select('*')
+            .eq('company_id', companyId)
+            .eq('parent_sku', product.sku);
 
-          // 💥 AGGRESSIVE ERROR CATCHING
-          if (ingError) {
-              console.error("❌ SUPABASE INGREDIENT ERROR:", ingError);
-              alert(`Database Error fetching ingredients: ${ingError.message}\n\n(Check if 'product_ingredients' table exists in Supabase and RLS is disabled)`);
-          }
+          if (ingError) {
+              console.error("❌ SUPABASE INGREDIENT ERROR:", ingError);
+              alert(`Database Error fetching ingredients: ${ingError.message}\n\n(Check if 'product_ingredients' table exists in Supabase and RLS is disabled)`);
+          }
 
-          console.log("📦 RAW INGREDIENT DATA FROM SUPABASE:", ingData); // DEBUG LOG
+          console.log("📦 RAW INGREDIENT DATA FROM SUPABASE:", ingData); // DEBUG LOG
 
-          if (ingData && ingData.length > 0) {
-            const childSkus = ingData.map((i: any) => i.child_sku);
-            const { data: prodData, error: prodError } = await supabase
-              .from('products')
-              .select('sku, name')
-              .eq('company_id', companyId)
-              .in('sku', childSkus);
-              
-            if (prodError) console.error("❌ SUPABASE PRODUCT LOOKUP ERROR:", prodError);
+          if (ingData && ingData.length > 0) {
+            const childSkus = ingData.map((i: any) => i.child_sku);
+            const { data: prodData, error: prodError } = await supabase
+              .from('products')
+              .select('sku, name')
+              .eq('company_id', companyId)
+              .in('sku', childSkus);
+              
+            if (prodError) console.error("❌ SUPABASE PRODUCT LOOKUP ERROR:", prodError);
 
-            ingredients = ingData.map((i: any) => {
-               const p = prodData?.find((pd: any) => pd.sku === i.child_sku);
-               return {
-                  sku: i.child_sku,
-                  name: p?.name || i.child_sku,
-                  base_qty: parseFloat(i.qty_needed) || 0,
-                  current_qty: parseFloat(i.qty_needed) || 0,
-                  extra_cost: parseFloat(i.extra_cost) || 0
-               };
-            });
-          } else {
-             // Let us know if Supabase is literally empty for this item
-             console.warn(`⚠️ Supabase returned 0 ingredients for SKU: ${product.sku}. If this is a packaged item, your Python sync_worker isn't pushing ingredients to the cloud!`);
-          }
-        } catch (err) {
-          console.error("Failed to fetch ingredients", err);
-        }
-    } else {
-        console.warn("⚠️ Product has no SKU, cannot fetch ingredients!");
-    }
+            ingredients = ingData.map((i: any) => {
+               const p = prodData?.find((pd: any) => pd.sku === i.child_sku);
+               return {
+                  sku: i.child_sku,
+                  name: p?.name || i.child_sku,
+                  base_qty: parseFloat(i.qty_needed) || 0,
+                  current_qty: parseFloat(i.qty_needed) || 0,
+                  extra_cost: parseFloat(i.extra_cost) || 0
+               };
+            });
+          } else {
+             console.warn(`⚠️ Supabase returned 0 ingredients for SKU: ${product.sku}. If this is a packaged item, your Python sync_worker isn't pushing ingredients to the cloud!`);
+          }
+        } catch (err) {
+          console.error("Failed to fetch ingredients", err);
+        }
+    } else {
+        console.warn("⚠️ Product has no SKU, cannot fetch ingredients!");
+    }
 
-    setCart(prev => {
-      // Safety check: ensure it wasn't rapidly double-clicked while fetching
-      const existingNow = prev.find(i => i.id === product.id);
-      if (existingNow) {
-          if (ingredients.length > 0) {
-              // Packaged item rapid click -> force new line
-              return [...prev, {
-                line_id: crypto.randomUUID(),
-                id: product.id,
-                sku: product.sku,
-                name: product.name,
-                price: parseFloat(product.price) || 0,
-                qty: 1,
-                disc_type: null,
-                disc_val: 0,
-                tax_code: product.tax_code || 'HST',
-                prov_tax_code: product.prov_tax_code || 'Exempt',
-                ingredients: ingredients
-              }];
-          } else {
-              // Normal item rapid click -> increment
-              return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
-          }
-      }
-      return [...prev, {
-        line_id: crypto.randomUUID(),
-        id: product.id,
-        sku: product.sku,
-        name: product.name,
-        price: parseFloat(product.price) || 0,
-        qty: 1,
-        disc_type: null,
-        disc_val: 0,
-        tax_code: product.tax_code || 'HST',
-        prov_tax_code: product.prov_tax_code || 'Exempt',
-        ingredients: ingredients
-      }];
-    });
-  };
+    setCart(prev => {
+      const existingNow = prev.find(i => i.id === product.id);
+      if (existingNow) {
+          if (ingredients.length > 0) {
+              return [...prev, {
+                line_id: crypto.randomUUID(),
+                id: product.id,
+                sku: product.sku,
+                name: product.name,
+                price: parseFloat(product.price) || 0,
+                // --- THE FIX: Look for unit_cost ---
+                cost: parseFloat(product.unit_cost) || 0.0, 
+                qty: 1,
+                disc_type: null,
+                disc_val: 0,
+                tax_code: product.tax_code || 'HST',
+                prov_tax_code: product.prov_tax_code || 'Exempt',
+                item_commission: parseFloat(product.item_commission || 0), 
+                ingredients: ingredients
+              }];
+          } else {
+              return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+          }
+      }
+      return [...prev, {
+        line_id: crypto.randomUUID(),
+        id: product.id,
+        sku: product.sku,
+        name: product.name,
+        price: parseFloat(product.price) || 0,
+        // --- THE FIX: Look for unit_cost ---
+        cost: parseFloat(product.unit_cost) || 0.0, 
+        qty: 1,
+        disc_type: null,
+        disc_val: 0,
+        tax_code: product.tax_code || 'HST',
+        prov_tax_code: product.prov_tax_code || 'Exempt',
+        item_commission: parseFloat(product.item_commission || 0), 
+        ingredients: ingredients
+      }];
+    });
+  };
 
-  const updateIngredientQty = (line_id: string, sku: string, delta: number) => {
-      setCart(prevCart => prevCart.map(item => {
-          if (item.line_id !== line_id) return item;
-          if (!item.ingredients) return item;
+  const updateIngredientQty = (line_id: string, sku: string, delta: number) => {
+      setCart(prevCart => prevCart.map(item => {
+          if (item.line_id !== line_id) return item;
+          if (!item.ingredients) return item;
 
-          const newIngredients = item.ingredients.map(ing => {
-              if (ing.sku !== sku) return ing;
-              const newQty = Math.max(0, ing.current_qty + delta);
-              return { ...ing, current_qty: newQty };
-          });
+          const newIngredients = item.ingredients.map(ing => {
+              if (ing.sku !== sku) return ing;
+              const newQty = Math.max(0, ing.current_qty + delta);
+              return { ...ing, current_qty: newQty };
+          });
 
-          return { ...item, ingredients: newIngredients };
-      }));
-  };
+          return { ...item, ingredients: newIngredients };
+      }));
+  };
 
-  const addGiftCardItem = () => {
-    setCart(prev => [...prev, {
-      line_id: crypto.randomUUID(),
-      id: 'SYS_GIFT_CARD',
-      sku: 'SYS_GIFT_CARD',
-      name: 'Gift Card Load',
-      price: 0,
-      qty: 1,
-      disc_type: null,
-      disc_val: 0,
-      tax_code: 'Exempt',
-      prov_tax_code: 'Exempt',
-      is_gift_card: true,
-      card_number: ""
-    }]);
-  };
+  const addGiftCardItem = () => {
+    setCart(prev => [...prev, {
+      line_id: crypto.randomUUID(),
+      id: 'SYS_GIFT_CARD',
+      sku: 'SYS_GIFT_CARD',
+      name: 'Gift Card Load',
+      price: 0,
+      cost: 0, // <--- THE FIX
+      qty: 1,
+      disc_type: null,
+      disc_val: 0,
+      tax_code: 'Exempt',
+      prov_tax_code: 'Exempt',
+      is_gift_card: true,
+      card_number: ""
+    }]);
+  };
 
   const updateQty = (line_id: string, valStr: string) => {
     const newQty = parseFloat(valStr);
@@ -1488,18 +1590,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const confirmPark = async () => {
-    const now = new Date();
-    const year = now.getFullYear();
-    const month = String(now.getMonth() + 1).padStart(2, '0');
-    const day = String(now.getDate()).padStart(2, '0');
-    
-    let hours = now.getHours();
-    const ampm = hours >= 12 ? 'PM' : 'AM';
-    hours = hours % 12 || 12;
-    const formattedHours = String(hours).padStart(2, '0');
-    const mins = String(now.getMinutes()).padStart(2, '0');
-    
-    const nowStr = `${year}-${month}-${day} ${formattedHours}:${mins} ${ampm}`;
+    // --- STRICT UTC RULE ---
+    const nowStr = new Date().toISOString(); 
 
     const meta = {
       manual_discount: manualDiscount,
@@ -1601,10 +1693,10 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   // --- PAYMENT HANDLERS ---
-  const saveTransactionToDatabase = async (finalPaymentQueue: any[], changeDue: number = 0) => {
+  const saveTransactionToDatabase = async (finalPaymentQueue: any[], changeDue: number = 0) => {
     try {
       // =======================================================
-      // --- NEW: PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
+      // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
       // =======================================================
       let sessionQuery = supabase
         .from('cash_sessions')
@@ -1629,16 +1721,13 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }
       // =======================================================
 
-      // 1. Format Timestamp (Python strftime compatibility: YYYY-MM-DD HH:MM:SS)
+      // --- 1. STRICT UTC STORAGE FORMATTING ---
       const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, '0');
-      const day = String(now.getDate()).padStart(2, '0');
-      const hours = String(now.getHours()).padStart(2, '0');
-      const mins = String(now.getMinutes()).padStart(2, '0');
-      const secs = String(now.getSeconds()).padStart(2, '0');
-      const dateStr = `${year}-${month}-${day}`;
-      const timestampStr = `${dateStr} ${hours}:${mins}:${secs}`;
+      const timestampStr = now.toISOString(); // strict UTC ISO string
+      const dateStr = timestampStr.split('T')[0]; // Extract YYYY-MM-DD from the UTC string
+      
+      // Determine local timezone for receipt display projection
+      const localTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
 
       const saleId = `SALE_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
       const finalStoreId = storeId === "ALL_STORES" ? null : storeId;
@@ -1652,49 +1741,92 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         mainMethod = `Split (${uniqueMethods.join(', ')})`;
       }
 
-      // Delta Logic for Refund (Advanced Ingredient Diffing)
+      // Delta Logic for Refund
       let itemsToSave: any[] = [];
       
       if (isRefundMode) {
-          for (const orig of originalSaleItems) {
-             const cartItem = cart.find(c => c.line_id === orig.line_id);
-             const cartQty = cartItem ? cartItem.qty : 0;
-             const parentDelta = cartQty - orig.qty; // Represents items removed from cart to refund
+          const origMap: Record<string, any[]> = {};
+          originalSaleItems.forEach(item => {
+              const key = item.line_id; // <--- THE FIX: Groups perfectly by unique instance
+              if (!origMap[key]) origMap[key] = [];
+              origMap[key].push(item);
+          });
+
+          const cartMap: Record<string, any[]> = {};
+          cart.forEach(item => {
+              const key = item.line_id; // <--- THE FIX: Groups perfectly by unique instance
+              if (!cartMap[key]) cartMap[key] = [];
+              cartMap[key].push(item);
+          });
+
+          const allKeys = new Set([...Object.keys(origMap), ...Object.keys(cartMap)]);
+
+          allKeys.forEach(key => {
+             const origList = origMap[key] || [];
+             const cartList = cartMap[key] || [];
+             
+             const origQty = origList.reduce((sum, i) => sum + (parseFloat(i.qty) || 0), 0);
+             const cartQty = cartList.reduce((sum, i) => sum + (parseFloat(i.qty) || 0), 0);
+             const parentDelta = cartQty - origQty; 
+             
+             const refItem = cartList.length > 0 ? cartList[0] : origList[0];
              
              let hasIngredientChange = false;
              let finalIngredients: any[] = [];
              
-             const origIngs = orig.ingredients || [];
-             const cartIngs = cartItem ? (cartItem.ingredients || []) : [];
+             const getIngTotals = (itemList: any[]) => {
+                 const totals: Record<string, number> = {};
+                 itemList.forEach(i => {
+                     const pQty = parseFloat(i.qty) || 0;
+                     (i.ingredients || []).forEach((ing: any) => {
+                         const sku = ing.sku || ing.child_sku;
+                         if (sku) {
+                             totals[sku] = (totals[sku] || 0) + (pQty * (parseFloat(ing.current_qty) || 0));
+                         }
+                     });
+                 });
+                 return totals;
+             };
+
+             const origIngTotals = getIngTotals(origList);
+             const cartIngTotals = getIngTotals(cartList);
+             const allIngSkus = new Set([...Object.keys(origIngTotals), ...Object.keys(cartIngTotals)]);
              
-             const allSkus = new Set([...origIngs.map((i: any) => i.sku || i.child_sku), ...cartIngs.map((i: any) => i.sku || i.child_sku)]);
-             
-             allSkus.forEach(sku => {
-                 const oIng = origIngs.find((i: any) => (i.sku || i.child_sku) === sku);
-                 const cIng = cartIngs.find((i: any) => (i.sku || i.child_sku) === sku);
-                 
-                 const oQty = (oIng ? parseFloat(oIng.current_qty) || 0 : 0) * orig.qty;
-                 const cQty = (cIng ? parseFloat(cIng.current_qty) || 0 : 0) * cartQty;
+             const isPartialIngChange = Math.abs(parentDelta) < 0.001;
+
+             allIngSkus.forEach(sku => {
+                 const oQty = origIngTotals[sku] || 0;
+                 const cQty = cartIngTotals[sku] || 0;
                  
                  const deltaQ = cQty - oQty; 
                  if (Math.abs(deltaQ) > 0.001) hasIngredientChange = true;
                  
                  const perUnitQ = Math.abs(parentDelta) > 0.001 ? deltaQ / parentDelta : deltaQ;
-                 const baseRef = cIng || oIng;
                  
-                 finalIngredients.push({
-                     sku: sku,
-                     name: baseRef.name || 'Unknown',
-                     current_qty: perUnitQ,
-                     base_qty: Math.abs(parentDelta) < 0.001 ? 0 : (baseRef.base_qty || 0),
-                     extra_cost: baseRef.extra_cost || 0,
-                     is_damaged: refundIngredientShrinkageIds.has(`${orig.line_id}:${sku}`) 
-                 });
+                 let refIng = null;
+                 for (const lst of [cartList, origList]) {
+                     for (const i of lst) {
+                         const match = (i.ingredients || []).find((ig: any) => (ig.sku === sku || ig.child_sku === sku));
+                         if (match) { refIng = match; break; }
+                     }
+                     if (refIng) break;
+                 }
+                 
+                 if (refIng) {
+                     finalIngredients.push({
+                         sku: sku,
+                         name: refIng.name || 'Unknown',
+                         current_qty: perUnitQ,
+                         base_qty: isPartialIngChange ? 0 : (refIng.base_qty || 0),
+                         extra_cost: refIng.extra_cost || 0,
+                         is_damaged: refundIngredientShrinkageIds.has(`${refItem.line_id}:${sku}`) 
+                     });
+                 }
              });
              
-             if (Math.abs(parentDelta) < 0.001 && !hasIngredientChange) continue;
+             if (Math.abs(parentDelta) < 0.001 && !hasIngredientChange) return;
              
-             let deltaItem = JSON.parse(JSON.stringify(cartItem || orig));
+             let deltaItem = JSON.parse(JSON.stringify(refItem));
              if (Math.abs(parentDelta) < 0.001) {
                  deltaItem.qty = 1.0; 
                  deltaItem.price = 0.0;
@@ -1704,10 +1836,12 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                  deltaItem.is_pure_ing_refund = false;
              }
              deltaItem.ingredients = finalIngredients;
-             deltaItem.is_damaged = refundShrinkageIds.has(orig.line_id) ? 1 : 0;
+             deltaItem.is_damaged = refundShrinkageIds.has(refItem.line_id) ? 1 : 0;
+             // Maintain the cost on the delta object correctly
+             deltaItem.cost = refItem.cost || 0.0; 
              
              itemsToSave.push(deltaItem);
-          }
+          });
       } else {
           itemsToSave = cart.map(i => ({...i, is_damaged: 0, is_pure_ing_refund: false}));
       }
@@ -1876,19 +2010,24 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         prov_tax_val: db_prov_tax_val
       };
 
+      // --- FAST, COLLISION-FREE ID GENERATOR ---
+      // Uses milliseconds since Jan 1, 2024, shifted to fit safely in a 32-bit integer 
+      // without requiring a slow network request to check the database sequence.
+      let syncBaseId = Math.floor((Date.now() - 1704067200000) / 10) * 100;
+
       // 3. Prepare Sale Items
       const saleItemsRecords = itemsToSave.map(item => {
           const surcharge = getItemSurcharge(item);
           
           return {
-              id: Math.floor(Math.random() * 1000000000) + 1000000, 
+              id: syncBaseId++, // <--- THE FIX
               sale_id: saleId,
               product_id: (item.sku === 'SYS_TIP' || item.sku === 'SYS_GIFT_CARD' || item.is_tip || item.is_gift_card) ? null : (item.id || null),
               sku: item.sku || "",
               name: item.name,
               qty: item.qty,
               price: item.price + surcharge,
-              cost: 0.0, 
+              cost: item.cost || 0.0, 
               disc_type: item.disc_type || null,
               disc_val: item.disc_val || 0,
               ingredients_snapshot: (item.ingredients && item.ingredients.length > 0) || item.card_number ? JSON.stringify({ 
@@ -1903,7 +2042,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
 
       // 4. Prepare Sale Payments
       const salePaymentsRecords = finalPaymentQueue.map(p => ({
-        id: Math.floor(Math.random() * 1000000000) + 1000000, 
+        id: syncBaseId++, // <--- THE FIX
         sale_id: saleId,
         method: p.method,
         amount: p.amount,
@@ -1921,15 +2060,18 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       if (paymentsError) throw new Error(`Payments Table: ${paymentsError.message}`);
 
       // 5. Handle Tips Ledger
-      if (!isRefundMode) {
-        const tipItems = cart.filter(i => (i.is_tip || i.sku === 'SYS_TIP') && i.price > 0);
-        if (tipItems.length > 0) {
-          const totalTip = tipItems.reduce((sum, item) => sum + (item.price * item.qty), 0);
+      const tipItemsToSave = itemsToSave.filter(i => i.is_tip || i.sku === 'SYS_TIP' || i.name?.toLowerCase().includes('tip'));
+      
+      if (tipItemsToSave.length > 0) {
+        const totalTip = tipItemsToSave.reduce((sum, item) => sum + (item.price * item.qty), 0);
+        
+        if (Math.abs(totalTip) > 0.001) {
+          const targetUserId = isRefundMode && refundData?.user_id ? refundData.user_id : (user?.id || null);
           const { error: tipError } = await supabase.from('tips_ledger').insert([{
             id: `TIP_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
             company_id: companyId,
             store_id: finalStoreId,
-            user_id: user?.id || null,
+            user_id: targetUserId,
             sale_id: saleId,
             date: timestampStr,
             amount: totalTip,
@@ -1939,47 +2081,173 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         }
       }
 
-      // 6. Handle Gift Card Loads (Cart Items)
-      const gcItems = cart.filter(i => (i.is_gift_card || i.sku === 'SYS_GIFT_CARD') && i.price > 0);
-      const unique_gc_lines: string[] = []; 
-      
-      for (const gc of gcItems) {
-        const loadAmt = isRefundMode ? -(gc.price * (gc.qty - (originalSaleItems.find(o => o.line_id === gc.line_id)?.qty || 0))) : gc.price * gc.qty;
-        const cNum = gc.card_number;
-        if (cNum && loadAmt !== 0) {
-          const { data: existingGc } = await supabase.from('gift_cards')
-            .select('current_balance')
-            .eq('company_id', companyId)
-            .eq('card_number', cNum)
-            .maybeSingle();
+      // --- 5.5 Handle Commissions Ledger ---
+      // 1. Calculate raw subtotal to determine the global discount ratio
+      let rawCommSubtotal = 0.0;
+      itemsToSave.forEach(i => {
+          if (i.is_tip || i.sku === 'SYS_TIP' || i.is_gift_card || i.sku === 'SYS_GIFT_CARD') return;
+          const surcharge = getItemSurcharge(i);
+          let lineVal = (i.price + surcharge) * i.qty;
+          if (i.disc_type === "%") lineVal -= lineVal * (parseFloat(i.disc_val || 0) / 100);
+          else if (i.disc_type === "$") {
+              if (lineVal < 0) lineVal += Math.abs(parseFloat(i.disc_val || 0));
+              else lineVal -= Math.abs(parseFloat(i.disc_val || 0));
+          }
+          rawCommSubtotal += lineVal;
+      });
 
-          let newBalance = loadAmt;
+      // 2. Determine the exact ratio of the final bill after global discounts
+      let commRatio = 1.0;
+      if (Math.abs(rawCommSubtotal) > 0.001) {
+          let p_amt = 0;
+          const p_val = promoDiscount.val || 0;
+          if (promoDiscount.type === "%") p_amt = rawCommSubtotal * (p_val / 100);
+          else if (promoDiscount.type === "$") p_amt = rawCommSubtotal > 0 ? p_val : -Math.abs(p_val);
 
-          if (existingGc) {
-             newBalance = parseFloat(existingGc.current_balance) + loadAmt;
-             await supabase.from('gift_cards')
-              .update({ 
-                current_balance: newBalance,
-                updated_at: timestampStr
-              })
-              .eq('company_id', companyId)
-              .eq('card_number', cNum);
-          } else if (!isRefundMode) {
-            await supabase.from('gift_cards').insert([{
-              id: `GC_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
-              company_id: companyId,
-              store_id: finalStoreId,
-              card_number: cNum,
-              initial_balance: loadAmt,
-              current_balance: loadAmt,
-              status: 'Active',
-              created_at: timestampStr,
-              updated_at: timestampStr
-            }]);
+          const sub_after = rawCommSubtotal - p_amt;
+
+          let m_amt = 0;
+          const m_val = manualDiscount.val || 0;
+          if (manualDiscount.type === "%") m_amt = sub_after * (m_val / 100);
+          else if (manualDiscount.type === "$") m_amt = sub_after > 0 ? m_val : -Math.abs(m_val);
+
+          commRatio = (sub_after - m_amt) / rawCommSubtotal;
+      }
+
+      // 3. Calculate exact commission payload per item and SPLIT by positive/negative
+      let refundCommissionTotal = 0.0;
+      let newSaleCommissionTotal = 0.0;
+
+      itemsToSave.forEach(i => {
+          if (i.is_tip || i.sku === 'SYS_TIP' || i.is_gift_card || i.sku === 'SYS_GIFT_CARD') return;
+          
+          const surcharge = getItemSurcharge(i);
+          let lineVal = (i.price + surcharge) * i.qty; 
+          
+          if (i.disc_type === "%") lineVal -= lineVal * (parseFloat(i.disc_val || 0) / 100);
+          else if (i.disc_type === "$") {
+              if (lineVal < 0) lineVal += Math.abs(parseFloat(i.disc_val || 0));
+              else lineVal -= Math.abs(parseFloat(i.disc_val || 0));
           }
           
-          // PUSH TO RECEIPT
-          unique_gc_lines.push(`Card ${cNum.slice(-4)} Balance: $${newBalance.toFixed(2)}`);
+          const finalLineVal = lineVal * commRatio;
+          let currentItemCommission = 0.0;
+          
+          // Apply Item-Specific Commission
+          if (commItemEnabled) {
+              const itemRate = parseFloat(i.item_commission || 0);
+              if (itemRate > 0) {
+                  currentItemCommission += finalLineVal * (itemRate / 100.0);
+              }
+          }
+
+          // Apply Global Commission
+          if (commGlobalEnabled && commGlobalRate > 0) {
+              currentItemCommission += finalLineVal * (commGlobalRate / 100.0);
+          }
+
+          // Route the commission based on whether it's a return or a sale
+          if (currentItemCommission < -0.001) {
+              refundCommissionTotal += currentItemCommission;
+          } else if (currentItemCommission > 0.001) {
+              newSaleCommissionTotal += currentItemCommission;
+          }
+      });
+      
+      // 4. Build the Ledger Insert Array
+      const commRecordsToInsert = [];
+
+      if (Math.abs(refundCommissionTotal) > 0.001) {
+          const targetUserId = isRefundMode && refundData?.user_id ? refundData.user_id : (user?.id || null);
+          commRecordsToInsert.push({
+              id: `COMM_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
+              company_id: companyId,
+              store_id: finalStoreId,
+              user_id: targetUserId, 
+              sale_id: saleId,
+              date: timestampStr,
+              amount: refundCommissionTotal, 
+              is_paid: 0
+          });
+      }
+
+      if (Math.abs(newSaleCommissionTotal) > 0.001) {
+          commRecordsToInsert.push({
+              id: `COMM_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
+              company_id: companyId,
+              store_id: finalStoreId,
+              user_id: user?.id || null,
+              sale_id: saleId,
+              date: timestampStr,
+              amount: newSaleCommissionTotal, 
+              is_paid: 0
+          });
+      }
+
+      if (commRecordsToInsert.length > 0) {
+          const { error: commError } = await supabase.from('commissions_ledger').insert(commRecordsToInsert);
+          if (commError) throw new Error(`Commissions Ledger: ${commError.message}`);
+      }
+      // ------------------------------------------
+
+      // 6. Handle Gift Card Loads 
+      const unique_gc_lines: string[] = []; 
+      
+      for (const item of itemsToSave) {
+        if (item.is_gift_card || item.sku === 'SYS_GIFT_CARD') {
+            let cNum = item.card_number;
+            if (!cNum && item.ingredients_snapshot) {
+                try {
+                    const snap = JSON.parse(item.ingredients_snapshot);
+                    cNum = snap.card_number;
+                } catch(e) {}
+            }
+            
+            const loadAmt = item.price * item.qty; 
+            
+            if (cNum && Math.abs(loadAmt) > 0.001) {
+              const { data: existingGc } = await supabase.from('gift_cards')
+                .select('current_balance, initial_balance') 
+                .eq('company_id', companyId)
+                .eq('card_number', cNum)
+                .maybeSingle();
+
+              let newBalance = loadAmt;
+
+              if (existingGc) {
+                 const currBal = parseFloat(existingGc.current_balance || "0");
+                 const initBal = parseFloat(existingGc.initial_balance || "0");
+                 newBalance = currBal + loadAmt;
+                 
+                 if (newBalance <= 0.001 && initBal <= (Math.abs(loadAmt) + 0.001)) {
+                     await supabase.from('gift_cards').delete().eq('company_id', companyId).eq('card_number', cNum);
+                 } else {
+                     await supabase.from('gift_cards')
+                      .update({ 
+                        current_balance: newBalance,
+                        updated_at: timestampStr
+                      })
+                      .eq('company_id', companyId)
+                      .eq('card_number', cNum);
+                 }
+              } else if (!isRefundMode) {
+                await supabase.from('gift_cards').insert([{
+                  id: `GC_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
+                  company_id: companyId,
+                  store_id: finalStoreId,
+                  card_number: cNum,
+                  initial_balance: loadAmt,
+                  current_balance: loadAmt,
+                  status: 'Active',
+                  created_at: timestampStr,
+                  updated_at: timestampStr
+                }]);
+              }
+              
+              if (newBalance > 0.001) {
+                 unique_gc_lines.push(`Card ${cNum.slice(-4)} Balance: $${newBalance.toFixed(2)}`);
+              }
+            }
         }
       }
 
@@ -2008,13 +2276,13 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         }
       }
 
-      // 8. Inventory Ledger Update (The Supabase DB Trigger handles actual quantities now)
+      // 8. Inventory Ledger Update 
       const inventoryRecords: any[] = [];
 
       for (const item of itemsToSave) {
         if (item.is_tip || item.is_gift_card || item.sku === 'SYS_TIP' || item.sku === 'SYS_GIFT_CARD') continue;
         
-        let parentQtyChange = -item.qty; // Sell is negative, Refund is positive
+        let parentQtyChange = -item.qty; 
 
         if (item.ingredients && item.ingredients.length > 0) {
           for (const ing of item.ingredients) {
@@ -2072,9 +2340,9 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       const logDesc = `${actionTxt}: #${shortId} for $${Math.abs(finalSaleTotal).toFixed(2)} (${mainMethod})`;
       
       const { error: actError } = await supabase.from('activity_log').insert([{
-        id: Math.floor(Math.random() * 1000000000) + 1000000, // <--- Bypasses sequence collision
+        id: syncBaseId++, // <--- THE FIX
         date: dateStr,
-        timestamp: Math.floor(now.getTime() / 1000), // UNIX epoch
+        timestamp: Math.floor(now.getTime() / 1000), 
         company_id: companyId,
         store_id: finalStoreId,
         user_id: user?.id || null,
@@ -2084,11 +2352,15 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }]);
       if (actError) throw new Error(`Activity Log: ${actError.message}`);
 
-      // 10. Compile the Comprehensive Receipt Data Payload
+      // --- 10. LOCAL TIMEZONE PROJECTION FOR RECEIPT ---
+      const localDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(now);
+      const localTimeStr = new Intl.DateTimeFormat('en-US', { timeZone: localTz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(now);
+
       const receiptData = {
           companyName: rawConfig?.companyName || "Our Store",
           sale_id: saleId,
-          date: now.toLocaleDateString('en-US', { month: 'long', day: '2-digit', year: 'numeric' }),
+          date: localDateStr,
+          time: localTimeStr, // Newly injected local time string
           cashier: user?.username || user?.first_name || "Staff",
           customer: customer ? `${customer.first_name} ${customer.last_name}` : "Guest",
           items: itemsToSave.map(i => ({ ...i, price: i.price + getItemSurcharge(i) })),
@@ -2128,91 +2400,91 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const processPayment = async (method: string) => {
-    let cardNum: string | null | undefined = undefined;
-    let availableGcBalance: number | null = null;
-    
-    if (method === "Gift Card") {
-      cardNum = await customPrompt("Gift Card Payment", "Swipe or Enter Gift Card Number:");
-      
-      if (!cardNum || !cardNum.trim()) return; 
-      cardNum = cardNum.trim();
+    let cardNum: string | null | undefined = undefined;
+    let availableGcBalance: number | null = null;
+    
+    if (method === "Gift Card") {
+      cardNum = await customPrompt("Gift Card Payment", "Swipe or Enter Gift Card Number:");
+      
+      if (!cardNum || !cardNum.trim()) return; 
+      cardNum = cardNum.trim();
 
-      try {
-          const { data: gc, error } = await supabase
-              .from('gift_cards')
-              .select('current_balance, status')
-              .eq('company_id', companyId)
-              .eq('card_number', cardNum)
-              .maybeSingle();
+      try {
+          const { data: gc, error } = await supabase
+              .from('gift_cards')
+              .select('current_balance, status')
+              .eq('company_id', companyId)
+              .eq('card_number', cardNum)
+              .maybeSingle();
 
-          if (error) throw error;
+          if (error) throw error;
 
-          if (!gc) {
-              await customAlert("Card Not Found", `Gift Card '${cardNum}' could not be found in the system.`);
-              return;
-          }
+          if (!gc) {
+              await customAlert("Card Not Found", `Gift Card '${cardNum}' could not be found in the system.`);
+              return;
+          }
 
-          if (gc.status === 'Inactive' || gc.status === 'Void') {
-              await customAlert("Invalid Status", `Gift Card '${cardNum}' is currently marked as ${gc.status}.`);
-              return;
-          }
+          if (gc.status === 'Inactive' || gc.status === 'Void') {
+              await customAlert("Invalid Status", `Gift Card '${cardNum}' is currently marked as ${gc.status}.`);
+              return;
+          }
 
-          availableGcBalance = parseFloat(gc.current_balance || "0");
-          
-          if (availableGcBalance <= 0 && !isRefundMode) {
-              await customAlert("Empty Balance", `Gift Card '${cardNum}' has a $0.00 balance.`);
-              return;
-          }
-      } catch (err) {
-          console.error("Error verifying gift card:", err);
-          await customAlert("Network Error", "Failed to verify gift card with the server. Please check your connection.");
-          return;
-      }
-    }
+          availableGcBalance = parseFloat(gc.current_balance || "0");
+          
+          if (availableGcBalance <= 0 && !isRefundMode) {
+              await customAlert("Empty Balance", `Gift Card '${cardNum}' has a $0.00 balance.`);
+              return;
+          }
+      } catch (err) {
+          console.error("Error verifying gift card:", err);
+          await customAlert("Network Error", "Failed to verify gift card with the server. Please check your connection.");
+          return;
+      }
+    }
 
-    const currentTotalVal = isRefundMode ? totals.total - originalSaleTotal : totals.total;
-    const currentRemaining = currentTotalVal - paymentQueue.reduce((a, b) => a + b.amount, 0);
-    
-    if (Math.abs(currentRemaining) <= 0.001) return;
+    const currentTotalVal = isRefundMode ? totals.total - originalSaleTotal : totals.total;
+    const currentRemaining = currentTotalVal - paymentQueue.reduce((a, b) => a + b.amount, 0);
+    
+    if (Math.abs(currentRemaining) <= 0.001) return;
 
-    let amountToPay = parseFloat(splitAmount);
-    if (isNaN(amountToPay)) amountToPay = currentRemaining;
+    let amountToPay = parseFloat(splitAmount);
+    if (isNaN(amountToPay)) amountToPay = currentRemaining;
 
-    const payAmountSigned = currentRemaining >= 0 ? Math.abs(amountToPay) : -Math.abs(amountToPay);
+    const payAmountSigned = currentRemaining >= 0 ? Math.abs(amountToPay) : -Math.abs(amountToPay);
 
-    let actualCharge = payAmountSigned;
-    let changeDue = 0;
+    let actualCharge = payAmountSigned;
+    let changeDue = 0;
 
-    if (Math.abs(payAmountSigned) > Math.abs(currentRemaining) + 0.001) {
-      if (method === "Cash") {
-        changeDue = Math.abs(payAmountSigned) - Math.abs(currentRemaining);
-        actualCharge = currentRemaining;
-      } else {
-        actualCharge = currentRemaining;
-      }
-    }
+    if (Math.abs(payAmountSigned) > Math.abs(currentRemaining) + 0.001) {
+      if (method === "Cash") {
+        changeDue = Math.abs(payAmountSigned) - Math.abs(currentRemaining);
+        actualCharge = currentRemaining;
+      } else {
+        actualCharge = currentRemaining;
+      }
+    }
 
-    if (method === "Gift Card" && availableGcBalance !== null && !isRefundMode) {
-        if (actualCharge > availableGcBalance) {
-            actualCharge = availableGcBalance;
-            await customAlert("Partial Payment Applied", `Gift Card only has $${availableGcBalance.toFixed(2)} available. Applying partial payment to the bill.`);
-        }
-    }
+    if (method === "Gift Card" && availableGcBalance !== null && !isRefundMode) {
+        if (actualCharge > availableGcBalance) {
+            actualCharge = availableGcBalance;
+            await customAlert("Partial Payment Applied", `Gift Card only has $${availableGcBalance.toFixed(2)} available. Applying partial payment to the bill.`);
+        }
+    }
 
-    const newQueue = [...paymentQueue, { method, amount: actualCharge, card_number: cardNum }];
-    setPaymentQueue(newQueue);
+    const newQueue = [...paymentQueue, { method, amount: actualCharge, card_number: cardNum }];
+    setPaymentQueue(newQueue);
 
-    const newRemaining = currentTotalVal - newQueue.reduce((a, b) => a + b.amount, 0);
-    
-    if (Math.abs(newRemaining) <= 0.01) {
-      const success = await saveTransactionToDatabase(newQueue, changeDue);
-      if (!success) {
-         setPaymentQueue(paymentQueue);
-      }
-    } else {
-      setSplitAmount(Math.abs(newRemaining).toFixed(2));
-    }
-  };
+    const newRemaining = currentTotalVal - newQueue.reduce((a, b) => a + b.amount, 0);
+    
+    if (Math.abs(newRemaining) <= 0.01) {
+      const success = await saveTransactionToDatabase(newQueue, changeDue);
+      if (!success) {
+         setPaymentQueue(paymentQueue);
+      }
+    } else {
+      setSplitAmount(Math.abs(newRemaining).toFixed(2));
+    }
+  };
 
   // --- UI RENDER ---
   if (isStoreOpen === false) {
@@ -2357,7 +2629,11 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
               {isRefundMode ? 'CANCEL REFUND' : 'VOID'}
             </button>
             <span className="text-gray-400 text-sm ml-3 font-medium tracking-wider">
-              {currentTime.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
+              {currentTime.toLocaleTimeString([], { 
+                 timeZone: getStoreTimezone(storeProvince, storeId === "ALL_STORES"), 
+                 hour: '2-digit', 
+                 minute:'2-digit' 
+              })}
             </span>
           </div>
         </div>
@@ -2697,6 +2973,15 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                         }
                         
                         if (Math.abs(deltaTotal) < 0.01) {
+                            if (isRefundMode) {
+                                const cartQtys = cart.map(i => `${i.line_id}:${i.qty}`).join('|');
+                                const origQtys = originalSaleItems.map(i => `${i.line_id}:${i.qty}`).join('|');
+                                if (cartQtys === origQtys) {
+                                    await customAlert("No Changes Detected", "To process a refund, please reduce the quantity of the items you wish to return, or click 'Remove'.");
+                                    return;
+                                }
+                            }
+                            
                             const zeroMethod = isRefundMode ? "Exchange" : "Cash";
                             await saveTransactionToDatabase([{ method: zeroMethod, amount: 0 }], 0);
                         } else {
@@ -2775,13 +3060,22 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                       const itemCount = sale.cart_json ? JSON.parse(sale.cart_json).length : 0;
                       const parsedTotal = sale.meta_json ? JSON.parse(sale.meta_json).total_val : 0;
                       const safeTotalVal = parseFloat(parsedTotal) || 0;
+                      
                       let timeStr = "Unknown Time";
                       if (sale.timestamp) {
                         try {
-                          const parts = sale.timestamp.split(' ');
-                          if (parts.length >= 2) timeStr = `${parts[1]} ${parts[2] || ''}`.trim();
-                          else timeStr = sale.timestamp;
-                        } catch(e) { timeStr = sale.timestamp; }
+                          const localTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
+                          const d = new Date(sale.timestamp); // Parses the strict UTC string
+                          timeStr = d.toLocaleString('en-US', { 
+                             timeZone: localTz, 
+                             month: 'short', 
+                             day: 'numeric', 
+                             hour: '2-digit', 
+                             minute: '2-digit' 
+                          });
+                        } catch(e) { 
+                          timeStr = sale.timestamp; 
+                        }
                       }
 
                       return (
