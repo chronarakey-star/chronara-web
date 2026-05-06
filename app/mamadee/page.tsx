@@ -31,9 +31,6 @@ interface Recipe {
   steps: Step[];
   media_urls: {
     main_image?: string;
-    main_audio?: string;
-    main_video?: string;
-    gallery?: string[];
   };
 }
 
@@ -123,6 +120,9 @@ export default function MamaDeeApp() {
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   
+  // State for the 3-dot menu
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+
   const [formData, setFormData] = useState<Recipe>({
     title: '', description: '', servings: 1, prep_min: 0, cook_min: 0, categories: [], ingredients: [], steps: [], media_urls: {}
   });
@@ -173,6 +173,22 @@ export default function MamaDeeApp() {
       steps: recipe.steps?.length > 0 ? recipe.steps : [{ text: '' }]
     });
     setView('edit');
+  };
+
+  const handleDeleteRecipe = async (e: React.MouseEvent, id: string) => {
+    e.stopPropagation(); // Stop the card from opening
+    setOpenMenuId(null); // Close the menu
+
+    const confirmDelete = window.confirm("Are you sure you want to permanently delete this recipe?");
+    if (!confirmDelete) return;
+
+    const { error } = await supabase.from('mamadee').delete().eq('id', id);
+    
+    if (error) {
+      alert(`Failed to delete recipe: ${error.message}`);
+    } else {
+      fetchRecipes(); // Refresh the list
+    }
   };
 
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -385,9 +401,16 @@ export default function MamaDeeApp() {
   // ============================================================================
   if (view === 'cook' && selectedRecipe) {
     return (
-      // Added print utility classes so that exporting to PDF perfectly formats on 8.5x11
       <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-2 sm:p-4 md:p-8 pb-12 print:bg-white print:text-black print:min-h-0 print:p-0">
         
+        {/* ADD THIS STYLE BLOCK TO HIDE BROWSER PRINT HEADERS/FOOTERS */}
+        <style>{`
+          @media print {
+            @page { margin: 0; }
+            body { padding: 1.5cm; }
+          }
+        `}</style>
+
         <div className="flex justify-between items-center mb-4 md:mb-6 border-b border-[#444] pb-3 md:pb-4 sticky top-0 bg-[#1E1E1E] z-10 pt-2 print:hidden">
           <button onClick={() => setView('library')} className="flex items-center text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2 px-1">
             ← Back
@@ -404,7 +427,6 @@ export default function MamaDeeApp() {
 
         <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-3 md:p-6 mb-4 md:mb-6 shadow-lg flex flex-col md:flex-row gap-4 md:gap-6 print:bg-white print:border-none print:shadow-none print:p-0 print:mb-6 print:flex-row">
           {selectedRecipe.media_urls?.main_image && (
-            // Swapped to aspect-square on mobile and object-contain so nothing cuts off
             <div className="relative w-full aspect-square md:aspect-auto md:w-1/3 md:max-h-64 rounded-lg overflow-hidden shadow-inner bg-[#111] shrink-0 print:w-48 print:h-48 print:max-h-48 print:aspect-square print:bg-transparent">
               <img src={selectedRecipe.media_urls.main_image} alt="Recipe" className="w-full h-full object-contain md:object-cover print:object-contain print:object-left-top" />
             </div>
@@ -507,7 +529,40 @@ export default function MamaDeeApp() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
           {filteredRecipes.length > 0 ? (
             filteredRecipes.map((recipe) => (
-              <div key={recipe.id} onClick={() => { setSelectedRecipe(recipe); setView('cook'); }} className="bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+              <div key={recipe.id} onClick={() => { setSelectedRecipe(recipe); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                
+                {/* --- 3-DOT MENU BUTTON --- */}
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation(); // Don't trigger the card's main click event
+                    setOpenMenuId(openMenuId === recipe.id ? null : recipe.id || null);
+                  }}
+                  className="absolute top-2 right-2 z-10 bg-black/50 hover:bg-black/70 text-white rounded-full p-2 transition-colors flex items-center justify-center w-8 h-8"
+                >
+                  {/* SVG for 3 vertical dots */}
+                  <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="1"></circle>
+                    <circle cx="12" cy="5" r="1"></circle>
+                    <circle cx="12" cy="19" r="1"></circle>
+                  </svg>
+                </button>
+
+                {/* --- 3-DOT MENU DROPDOWN --- */}
+                {openMenuId === recipe.id && (
+                  <>
+                    {/* Invisible overlay to close menu if clicked outside */}
+                    <div className="fixed inset-0 z-20 cursor-default" onClick={(e) => { e.stopPropagation(); setOpenMenuId(null); }} />
+                    <div className="absolute top-11 right-2 z-30 bg-[#1E1E1E] border border-[#555] rounded-md shadow-xl py-1 w-36">
+                      <button
+                        onClick={(e) => handleDeleteRecipe(e, recipe.id!)}
+                        className="w-full text-left px-4 py-2 text-[#C53636] hover:bg-[#333] transition-colors font-bold text-sm"
+                      >
+                        Delete Recipe
+                      </button>
+                    </div>
+                  </>
+                )}
+
                 {recipe.media_urls?.main_image ? (
                   <div className="relative h-40 md:h-48 w-full bg-[#1E1E1E]">
                     <img src={recipe.media_urls.main_image} alt={recipe.title} className="w-full h-full object-cover" />
