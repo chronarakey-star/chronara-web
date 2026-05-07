@@ -158,20 +158,25 @@ export default function MamaDeeApp() {
       const fetchedRecipes = data as Recipe[] || [];
       setRecipes(fetchedRecipes);
 
-      // --- NEW: DEEP LINKING LOGIC ---
-      // Check if the URL has an ?id=XYZ parameter
+      // --- DEEP LINKING LOGIC ---
       if (typeof window !== 'undefined') {
         const urlParams = new URLSearchParams(window.location.search);
         const recipeId = urlParams.get('id');
         
         if (recipeId) {
-          const targetRecipe = fetchedRecipes.find(r => r.id === recipeId);
+          // FIX: Convert both to Strings! Prevents Database (Number) vs URL (String) mismatch
+          const targetRecipe = fetchedRecipes.find(r => String(r.id) === String(recipeId));
+          
           if (targetRecipe) {
             setSelectedRecipe(targetRecipe);
             setView('cook');
+            
+            // Clean up the URL bar so it just says your normal address again
+            // We use a tiny timeout to ensure Next.js has fully loaded the view first
+            setTimeout(() => {
+              window.history.replaceState(null, '', window.location.pathname);
+            }, 100);
           }
-          // Clean up the URL bar so it just says your normal address again
-          window.history.replaceState(null, '', window.location.pathname);
         }
       }
     }
@@ -429,7 +434,7 @@ export default function MamaDeeApp() {
   const handleShareRecipe = async (recipe: Recipe) => {
     // Build the specific URL for this recipe
     const url = new URL(window.location.origin + window.location.pathname);
-    url.searchParams.set('id', recipe.id as string);
+    url.searchParams.set('id', String(recipe.id)); // FIX: Ensure ID is a string
     const shareUrl = url.toString();
 
     if (navigator.share) {
