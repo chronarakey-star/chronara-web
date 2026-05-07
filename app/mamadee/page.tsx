@@ -141,7 +141,8 @@ export default function MamaDeeApp() {
 
   const fetchRecipes = async () => {
     setLoading(true);
-    const { data, error } = await supabase.from('mamadee').select('*').order('created_at', { ascending: false });
+    // Updated to order alphabetically by title by default instead of created_at
+    const { data, error } = await supabase.from('mamadee').select('*').order('title', { ascending: true });
     if (!error) setRecipes(data as Recipe[] || []);
     setLoading(false);
   };
@@ -173,6 +174,30 @@ export default function MamaDeeApp() {
       steps: recipe.steps?.length > 0 ? recipe.steps : [{ text: '' }]
     });
     setView('edit');
+  };
+
+  const handleDuplicateRecipe = async (e: React.MouseEvent, recipe: Recipe) => {
+    e.stopPropagation();
+    setOpenMenuId(null);
+    setLoading(true);
+
+    // Destructure to remove the original ID so Supabase generates a new one
+    const { id, ...recipeWithoutId } = recipe; 
+    
+    const duplicatedRecipe = {
+      ...recipeWithoutId,
+      title: `${recipe.title} (Copy)`,
+    };
+
+    const { error } = await supabase.from('mamadee').insert([duplicatedRecipe]);
+
+    if (error) {
+      alert(`Failed to duplicate recipe: ${error.message}`);
+    } else {
+      fetchRecipes(); 
+    }
+    
+    setLoading(false);
   };
 
   const handleDeleteRecipe = async (e: React.MouseEvent, recipe: Recipe) => {
@@ -240,12 +265,24 @@ export default function MamaDeeApp() {
     
     setLoading(false);
   };
-
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setImageUploading(true);
+
+    // --- NEW: DELETE OLD IMAGE IF IT EXISTS ---
+    if (formData.media_urls?.main_image) {
+      const oldUrl = formData.media_urls.main_image;
+      const marker = 'mamadee_media/';
+      const index = oldUrl.indexOf(marker);
+      if (index !== -1) {
+        const oldPath = oldUrl.substring(index + marker.length);
+        console.log("Deleting replaced image from storage:", oldPath);
+        await supabase.storage.from('mamadee_media').remove([oldPath]);
+      }
+    }
+
     const fileName = `image_${Date.now()}_${file.name}`;
     
     const { data, error } = await supabase.storage.from('mamadee_media').upload(`images/${fileName}`, file);
@@ -454,11 +491,11 @@ export default function MamaDeeApp() {
     return (
       <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-2 sm:p-4 md:p-8 pb-12 print:bg-white print:text-black print:min-h-0 print:p-0">
         
-        {/* ADD THIS STYLE BLOCK TO HIDE BROWSER PRINT HEADERS/FOOTERS */}
+        {/* UPDATED STYLE BLOCK: Requires turning off "Headers and footers" in the print dialog */}
         <style>{`
           @media print {
-            @page { margin: 0; }
-            body { padding: 1.5cm; }
+            @page { margin: 1.5cm; }
+            body { margin: 0; padding: 0; }
           }
         `}</style>
 
@@ -603,12 +640,18 @@ export default function MamaDeeApp() {
                   <>
                     {/* Invisible overlay to close menu if clicked outside */}
                     <div className="fixed inset-0 z-20 cursor-default" onClick={(e) => { e.stopPropagation(); setOpenMenuId(null); }} />
-                    <div className="absolute top-11 right-2 z-30 bg-[#1E1E1E] border border-[#555] rounded-md shadow-xl py-1 w-36">
+                    <div className="absolute top-11 right-2 z-30 bg-[#1E1E1E] border border-[#555] rounded-md shadow-xl py-1 w-36 overflow-hidden">
+                      <button
+                        onClick={(e) => handleDuplicateRecipe(e, recipe)}
+                        className="w-full text-left px-4 py-2 text-white hover:bg-[#333] transition-colors font-bold text-sm border-b border-[#444]"
+                      >
+                        Duplicate
+                      </button>
                       <button
                         onClick={(e) => handleDeleteRecipe(e, recipe)}
                         className="w-full text-left px-4 py-2 text-[#C53636] hover:bg-[#333] transition-colors font-bold text-sm"
                       >
-                        Delete Recipe
+                        Delete
                       </button>
                     </div>
                   </>
