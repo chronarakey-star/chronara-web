@@ -153,7 +153,28 @@ export default function MamaDeeApp() {
   const fetchRecipes = async () => {
     setLoading(true);
     const { data, error } = await supabase.from('mamadee').select('*').order('title', { ascending: true });
-    if (!error) setRecipes(data as Recipe[] || []);
+    
+    if (!error) {
+      const fetchedRecipes = data as Recipe[] || [];
+      setRecipes(fetchedRecipes);
+
+      // --- NEW: DEEP LINKING LOGIC ---
+      // Check if the URL has an ?id=XYZ parameter
+      if (typeof window !== 'undefined') {
+        const urlParams = new URLSearchParams(window.location.search);
+        const recipeId = urlParams.get('id');
+        
+        if (recipeId) {
+          const targetRecipe = fetchedRecipes.find(r => r.id === recipeId);
+          if (targetRecipe) {
+            setSelectedRecipe(targetRecipe);
+            setView('cook');
+          }
+          // Clean up the URL bar so it just says your normal address again
+          window.history.replaceState(null, '', window.location.pathname);
+        }
+      }
+    }
     setLoading(false);
   };
 
@@ -405,6 +426,28 @@ export default function MamaDeeApp() {
     }
   };
 
+  const handleShareRecipe = async (recipe: Recipe) => {
+    // Build the specific URL for this recipe
+    const url = new URL(window.location.origin + window.location.pathname);
+    url.searchParams.set('id', recipe.id as string);
+    const shareUrl = url.toString();
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: recipe.title,
+          text: `Check out this recipe for ${recipe.title}!`,
+          url: shareUrl,
+        });
+      } catch (err) {
+        console.error("Error sharing:", err);
+      }
+    } else {
+      navigator.clipboard.writeText(shareUrl);
+      alert("Recipe link copied to clipboard!");
+    }
+  };
+
   // ============================================================================
   // CONTENT RENDERER
   // ============================================================================
@@ -578,6 +621,16 @@ export default function MamaDeeApp() {
               ← Back
             </button>
             <div className="flex gap-2">
+              <button onClick={() => handleShareRecipe(selectedRecipe)} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center" title="Share Recipe">
+                <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="md:mr-2">
+                  <circle cx="18" cy="5" r="3"></circle>
+                  <circle cx="6" cy="12" r="3"></circle>
+                  <circle cx="18" cy="19" r="3"></circle>
+                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+                </svg>
+                <span className="hidden md:inline">Share</span>
+              </button>
               <button onClick={() => window.print()} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center">
                 📄 PDF
               </button>
