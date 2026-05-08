@@ -793,15 +793,32 @@ export default function MamaDeeApp() {
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444]">
               <div className="flex justify-between items-center mb-4 border-b border-[#555] pb-2">
                 <h3 className="font-bold text-gray-300 uppercase tracking-wide text-sm md:text-base">Ingredients</h3>
-                <button onClick={() => setFormData(prev => ({ ...prev, ingredients: [...prev.ingredients, { name: '', quantity: 1, unit: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add</button>
+                {formData.ingredients.length === 0 && (
+                  <button onClick={() => setFormData(prev => ({ ...prev, ingredients: [{ name: '', quantity: 1, unit: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add First Ingredient</button>
+                )}
               </div>
               
               <div className="space-y-4">
                 {formData.ingredients.map((ing, idx) => (
-                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] space-y-3 relative pt-8 sm:pt-3">
-                    <button onClick={() => setFormData(prev => ({ ...prev, ingredients: prev.ingredients.filter((_, i) => i !== idx) }))} className="absolute top-1 right-2 text-red-500 font-bold hover:text-red-400 p-2 text-lg">✕</button>
+                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] space-y-3 relative pt-10 sm:pt-3">
                     
-                    <div className="flex flex-col sm:flex-row gap-2 sm:pr-8">
+                    {/* --- NEW INSERT/DELETE ACTIONS --- */}
+                    <div className="absolute top-2 right-2 flex items-center gap-2 z-10">
+                      <button 
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          const newArr = [...formData.ingredients]; 
+                          newArr.splice(idx + 1, 0, { name: '', quantity: 1, unit: '' }); 
+                          setFormData({...formData, ingredients: newArr}); 
+                        }} 
+                        className="text-gray-400 hover:text-white text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded bg-[#333] border border-[#555] transition-colors"
+                      >
+                        + Insert Below
+                      </button>
+                      <button onClick={() => setFormData(prev => ({ ...prev, ingredients: prev.ingredients.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 px-1 text-lg">✕</button>
+                    </div>
+                    
+                    <div className="flex flex-col sm:flex-row gap-2 sm:pr-40">
                       <div className="flex gap-2 w-full sm:w-auto">
                         <input type="number" step="any" list="qty-options" value={ing.quantity} onChange={e => { const newArr = [...formData.ingredients]; newArr[idx].quantity = e.target.value; setFormData({...formData, ingredients: newArr}); }} className="w-1/2 sm:w-20 bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] text-center" placeholder="Qty"/>
                         <input type="text" list="unit-options" value={ing.unit} onChange={e => { const newArr = [...formData.ingredients]; newArr[idx].unit = e.target.value; setFormData({...formData, ingredients: newArr}); }} className="w-1/2 sm:w-24 bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] text-center" placeholder="Unit"/>
@@ -819,17 +836,35 @@ export default function MamaDeeApp() {
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444]">
               <div className="flex justify-between items-center mb-4 border-b border-[#555] pb-2">
                 <h3 className="font-bold text-gray-300 uppercase tracking-wide text-sm md:text-base">Instructions</h3>
-                <button onClick={() => setFormData(prev => ({ ...prev, steps: [...prev.steps, { text: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add Step</button>
+                {formData.steps.length === 0 && (
+                  <button onClick={() => setFormData(prev => ({ ...prev, steps: [{ text: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add First Step</button>
+                )}
               </div>
               
               <div className="space-y-4">
                 {formData.steps.map((step, idx) => (
-                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] relative flex flex-col sm:flex-row gap-3">
-                    <div className="flex justify-between items-center sm:block">
-                        <div className="font-bold text-[#C53636] text-lg sm:pt-2">Step {idx + 1}.</div>
-                        <button onClick={() => setFormData(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 p-2 text-lg sm:absolute sm:top-1 sm:right-2">✕</button>
+                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] relative flex flex-col sm:flex-row gap-3 pt-10 sm:pt-3">
+                    
+                    {/* --- NEW INSERT/DELETE ACTIONS --- */}
+                    <div className="absolute top-2 right-2 flex items-center gap-2 z-10">
+                      <button 
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          const newArr = [...formData.steps]; 
+                          newArr.splice(idx + 1, 0, { text: '' }); 
+                          setFormData({...formData, steps: newArr}); 
+                        }} 
+                        className="text-gray-400 hover:text-white text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded bg-[#333] border border-[#555] transition-colors"
+                      >
+                        + Insert Below
+                      </button>
+                      <button onClick={() => setFormData(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 px-1 text-lg">✕</button>
                     </div>
-                    <div className="flex-1 space-y-3 sm:pr-8">
+
+                    <div className="flex justify-between items-center sm:block mt-1 sm:mt-0">
+                        <div className="font-bold text-[#C53636] text-lg sm:pt-1">Step {idx + 1}.</div>
+                    </div>
+                    <div className="flex-1 space-y-3 sm:pr-40">
                       <textarea value={step.text} onChange={e => { const newArr = [...formData.steps]; newArr[idx].text = e.target.value; setFormData({...formData, steps: newArr}); }} className="w-full bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] min-h-[100px]" placeholder="Describe this step..."/>
                       <div className="flex justify-start w-full">
                         {step.audio_url ? (
