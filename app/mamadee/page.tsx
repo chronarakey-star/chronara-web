@@ -144,6 +144,12 @@ export default function MamaDeeApp() {
   const [catEditName, setCatEditName] = useState("");
   const [catOldName, setCatOldName] = useState("");
 
+  // --- NEW STATE FOR AI FEATURE ---
+  const [showAiModal, setShowAiModal] = useState(false);
+  const [aiInputMode, setAiInputMode] = useState<'text' | 'url'>('url');
+  const [aiInputText, setAiInputText] = useState("");
+  const [aiProcessing, setAiProcessing] = useState(false);
+
   useEffect(() => {
     // Load local device password on mount
     setAppPassword(localStorage.getItem('mamadee_password') || "");
@@ -215,33 +221,6 @@ export default function MamaDeeApp() {
     }
   };
 
-  const executeAction = async (actionType: string, payload?: any) => {
-    if (actionType === 'settings') {
-      setShowSettings(true);
-    } else if (actionType === 'add') {
-      setFormData({ 
-        title: '', description: '', servings: 1, prep_min: 0, cook_min: 0, categories: [], media_urls: {},
-        ingredients: [{ name: '', quantity: 1, unit: '' }], 
-        steps: [{ text: '' }] 
-      });
-      setSelectedRecipe(null);
-      setView('edit');
-    } else if (actionType === 'edit') {
-      setFormData({ 
-        ...payload, 
-        media_urls: payload.media_urls || {},
-        categories: payload.categories || [],
-        ingredients: payload.ingredients?.length > 0 ? payload.ingredients : [{ name: '', quantity: 1, unit: '' }],
-        steps: payload.steps?.length > 0 ? payload.steps : [{ text: '' }]
-      });
-      setView('edit');
-    } else if (actionType === 'duplicate') {
-      await executeDuplicate(payload);
-    } else if (actionType === 'delete') {
-      await executeDelete(payload);
-    }
-  };
-
   const handleSavePassword = (newPass: string) => {
     localStorage.setItem('mamadee_password', newPass);
     setAppPassword(newPass);
@@ -270,6 +249,7 @@ export default function MamaDeeApp() {
   // ACTION WRAPPERS (Intercepted by Auth)
   // ============================================================================
   const handleAddRecipe = () => requireAuth('add');
+  const handleAiImportBtn = () => requireAuth('ai_import');
   const handleEditRecipe = (recipe: Recipe) => requireAuth('edit', recipe);
   
   const handleDuplicateRecipe = (e: React.MouseEvent, recipe: Recipe) => {
@@ -282,6 +262,37 @@ export default function MamaDeeApp() {
     e.stopPropagation();
     setOpenMenuId(null);
     requireAuth('delete', recipe);
+  };
+
+  const executeAction = async (actionType: string, payload?: any) => {
+    if (actionType === 'settings') {
+      setShowSettings(true);
+    } else if (actionType === 'add') {
+      setFormData({ 
+        title: '', description: '', servings: 1, prep_min: 0, cook_min: 0, categories: [], media_urls: {},
+        ingredients: [{ name: '', quantity: 1, unit: '' }], 
+        steps: [{ text: '' }] 
+      });
+      setSelectedRecipe(null);
+      setView('edit');
+    } else if (actionType === 'ai_import') {
+      setAiInputText("");
+      setAiInputMode("url");
+      setShowAiModal(true);
+    } else if (actionType === 'edit') {
+      setFormData({ 
+        ...payload, 
+        media_urls: payload.media_urls || {},
+        categories: payload.categories || [],
+        ingredients: payload.ingredients?.length > 0 ? payload.ingredients : [{ name: '', quantity: 1, unit: '' }],
+        steps: payload.steps?.length > 0 ? payload.steps : [{ text: '' }]
+      });
+      setView('edit');
+    } else if (actionType === 'duplicate') {
+      await executeDuplicate(payload);
+    } else if (actionType === 'delete') {
+      await executeDelete(payload);
+    }
   };
 
   // ============================================================================
@@ -453,6 +464,47 @@ export default function MamaDeeApp() {
     }
   };
 
+  const processAiImport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!aiInputText.trim()) return;
+    
+    setAiProcessing(true);
+    try {
+      const res = await fetch('/api/ai-recipe', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: aiInputMode, content: aiInputText })
+      });
+      
+      const data = await res.json();
+      
+      if (data.success) {
+        setFormData({
+          title: data.recipe.title || '', 
+          description: data.recipe.description || '', 
+          servings: data.recipe.servings || 1, 
+          prep_min: data.recipe.prep_min || 0, 
+          cook_min: data.recipe.cook_min || 0, 
+          categories: data.recipe.categories || [], 
+          media_urls: {},
+          ingredients: data.recipe.ingredients?.length > 0 ? data.recipe.ingredients : [{ name: '', quantity: 1, unit: '' }],
+          steps: data.recipe.steps?.length > 0 ? data.recipe.steps : [{ text: '' }]
+        });
+        
+        setShowAiModal(false);
+        setAiInputText("");
+        setSelectedRecipe(null);
+        setView('edit');
+      } else {
+        alert("AI parsing failed: " + data.error);
+      }
+    } catch (err) {
+      console.error(err);
+      alert("Error connecting to AI service.");
+    }
+    setAiProcessing(false);
+  };
+
   // ============================================================================
   // CONTENT RENDERER
   // ============================================================================
@@ -479,6 +531,15 @@ export default function MamaDeeApp() {
           </div>
 
           <div className="max-w-3xl mx-auto space-y-6">
+            
+            {/* NEW AI BUTTON PLACEMENT */}
+            <button 
+              onClick={(e) => { e.preventDefault(); handleAiImportBtn(); }} 
+              className="w-full bg-[#C53636]/10 hover:bg-[#C53636]/20 text-[#C53636] border border-[#C53636]/30 py-3 md:py-4 rounded-xl font-bold transition-colors shadow-sm text-sm md:text-base flex items-center justify-center gap-2 mb-4"
+            >
+              <span className="text-xl">✨</span> Auto-fill recipe using AI
+            </button>
+
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444] space-y-4">
               <div className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-[#555] rounded-xl bg-[#1E1E1E]">
                 {formData.media_urls?.main_image ? (
@@ -931,6 +992,46 @@ export default function MamaDeeApp() {
               </div>
 
             </div>
+          </div>
+        </div>
+      )}
+    {/* AI IMPORT MODAL */}
+      {showAiModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4">
+          <div className="bg-[#1E1E1E] border border-[#555] rounded-xl p-6 w-full max-w-lg shadow-2xl flex flex-col">
+            <div className="flex justify-between items-center mb-6 border-b border-[#444] pb-3">
+              <h2 className="text-xl font-bold flex items-center gap-2">✨ Import via AI</h2>
+              <button onClick={() => !aiProcessing && setShowAiModal(false)} className="text-gray-400 hover:text-white font-bold text-xl">✕</button>
+            </div>
+
+            <form onSubmit={processAiImport} className="space-y-4">
+              <div className="flex gap-2 p-1 bg-[#333] rounded-md">
+                <button type="button" onClick={() => setAiInputMode('url')} className={`flex-1 py-2 text-sm font-bold rounded ${aiInputMode === 'url' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Website URL</button>
+                <button type="button" onClick={() => setAiInputMode('text')} className={`flex-1 py-2 text-sm font-bold rounded ${aiInputMode === 'text' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Paste Text</button>
+              </div>
+
+              {aiInputMode === 'url' ? (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Recipe Link</label>
+                  <input type="url" required value={aiInputText} onChange={(e) => setAiInputText(e.target.value)} placeholder="https://..." className="w-full bg-[#2D2D2D] border border-[#555] rounded-md p-3 text-white focus:border-[#3B8ED0] outline-none"/>
+                  <p className="text-xs text-gray-500 mt-2">Paste a link to any food blog. The AI will read the site and extract the ingredients and instructions automatically.</p>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Raw Text</label>
+                  <textarea required value={aiInputText} onChange={(e) => setAiInputText(e.target.value)} placeholder="Paste messy email text, ingredients, etc..." className="w-full bg-[#2D2D2D] border border-[#555] rounded-md p-3 text-white focus:border-[#3B8ED0] outline-none h-48 resize-none"/>
+                </div>
+              )}
+
+              <div className="flex gap-3 justify-end pt-4 border-t border-[#444]">
+                <button type="button" onClick={() => setShowAiModal(false)} disabled={aiProcessing} className="px-4 py-2 text-gray-400 hover:text-white font-bold disabled:opacity-50">Cancel</button>
+                <button type="submit" disabled={aiProcessing || !aiInputText.trim()} className="bg-[#3B8ED0] hover:bg-[#2b6a9e] disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-md font-bold text-white shadow-lg flex items-center gap-2">
+                  {aiProcessing ? (
+                    <><span className="animate-spin">⏳</span> Scanning...</>
+                  ) : 'Extract Recipe'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
