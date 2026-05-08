@@ -1,19 +1,31 @@
 // app/api/ai-recipe/route.ts
 import { NextResponse } from 'next/server';
 
+// Pulls the key securely from your hidden .env.local file
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 export async function POST(req: Request) {
   try {
     const { type, content } = await req.json();
 
-    if (!GEMINI_API_KEY) {
-      throw new Error("API key is missing from environment variables.");
+    let textToParse = content;
+    if (type === 'url') {
+      // Upgraded User-Agent so food blogs don't block the scraper as a "bot"
+      const response = await fetch(content, {
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        }
+      });
+      if (!response.ok) throw new Error(`Website blocked the request. Status: ${response.status}`);
+      textToParse = await response.text(); 
     }
 
-    let aiContentParts: any[] = [];
-    const promptText = `
-    You are an expert culinary AI. Extract the recipe from the provided data.
+    // MATCHING CHRONARA KEY: Upgraded to Gemini 2.5 Pro
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${GEMINI_API_KEY}`;
+
+    const prompt = `
+    You are an expert culinary AI. Extract the recipe from the following text or HTML.
     Return ONLY a raw JSON object matching this structure exactly (do not include markdown formatting like \`\`\`json):
     {
       "title": "Recipe Name",
@@ -35,49 +47,32 @@ export async function POST(req: Request) {
     'g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice', or "" (empty string).
     Convert full words to these abbreviations automatically (e.g., "teaspoon" -> "tsp", "tablespoons" -> "tbsp").
     2. INGREDIENT NAMES: You MUST format all ingredient "name" fields in Title Case (e.g., "Pizza Dough", "Unsalted Butter", "Salt"). Do not leave them entirely lowercase.
-    3. HANDWRITING: If the input is an image of a handwritten recipe, transcribe it as accurately as possible.
     
     If a field is unknown, use 0 for numbers, "" for strings, and [] for arrays. Keep instructions concise and clean.
+    
+    DATA TO PARSE:
+    ${textToParse}
     `;
-
-    if (type === 'url') {
-      const response = await fetch(content, {
-        headers: { 
-          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
-        }
-      });
-      if (!response.ok) throw new Error(`Website blocked the request. Status: ${response.status}`);
-      const htmlText = await response.text(); 
-      aiContentParts = [{ text: `${promptText}\n\nDATA TO PARSE:\n${htmlText}` }];
-    } else if (type === 'image') {
-      const base64Data = content.split(',')[1];
-      const mimeType = content.split(';')[0].split(':')[1];
-      aiContentParts = [
-        { text: promptText },
-        { inline_data: { mime_type: mimeType, data: base64Data } }
-      ];
-    } else {
-      aiContentParts = [{ text: `${promptText}\n\nDATA TO PARSE:\n${content}` }];
-    }
-
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${GEMINI_API_KEY}`;
 
     const aiRes = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        contents: [{ parts: aiContentParts }]
+        contents: [{ parts: [{ text: prompt }] }]
       })
     });
 
     const aiData = await aiRes.json();
 
+    // --- STRICT ERROR HANDLING ---
+    // 1. Did the API return a hard error? (e.g., Quota exceeded, Bad API Key, Wrong Model)
     if (aiData.error) {
       throw new Error(`Gemini API Error: ${aiData.error.message}`);
     }
 
+    // 2. Did Gemini block the prompt for safety reasons?
     if (!aiData.candidates || aiData.candidates.length === 0) {
+      console.error("Empty AI Data:", JSON.stringify(aiData, null, 2));
       throw new Error("Gemini returned an empty response. The content may have been blocked by safety filters.");
     }
 
@@ -87,6 +82,7 @@ export async function POST(req: Request) {
       throw new Error("AI successfully connected, but failed to generate text.");
     }
 
+    // Clean up markdown wrapping if the AI includes it
     rawJson = rawJson.trim();
     if (rawJson.startsWith('```json')) rawJson = rawJson.slice(7);
     if (rawJson.startsWith('```')) rawJson = rawJson.slice(3);
