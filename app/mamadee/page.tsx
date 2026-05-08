@@ -146,7 +146,7 @@ export default function MamaDeeApp() {
   const [view, setView] = useState<'library' | 'cook' | 'edit'>('library');
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
-  const [multiplier, setMultiplier] = useState<number>(1); // NEW STATE
+  const [multiplier, setMultiplier] = useState<number>(1);
   
   // State for the 3-dot menu
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -163,7 +163,7 @@ export default function MamaDeeApp() {
   const [saving, setSaving] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
 
-  // --- NEW STATE FOR SETTINGS & AUTH ---
+  // --- SETTINGS & AUTH STATE ---
   const [appPassword, setAppPassword] = useState("");
   const [showPasswordModal, setShowPasswordModal] = useState(false);
   const [passwordInput, setPasswordInput] = useState("");
@@ -172,14 +172,153 @@ export default function MamaDeeApp() {
   const [catEditName, setCatEditName] = useState("");
   const [catOldName, setCatOldName] = useState("");
 
-  // --- NEW STATE FOR AI FEATURE ---
+  // --- AI FEATURE STATE ---
   const [showAiModal, setShowAiModal] = useState(false);
   const [aiInputMode, setAiInputMode] = useState<'text' | 'url' | 'upload' | 'camera'>('url');
   const [aiInputText, setAiInputText] = useState("");
   const [aiProcessing, setAiProcessing] = useState(false);
 
+  // --- NEW: VOICE NAVIGATION & WAKELOCK STATE ---
+  const [isListening, setIsListening] = useState(false);
+  const [activeStep, setActiveStep] = useState(-1);
+  const recognitionRef = useRef<any>(null);
+  const wakeLockRef = useRef<any>(null);
+  
+  // Refs to prevent stale closures in the voice event listener
+  const isListeningRef = useRef(false);
+  const activeStepRef = useRef(-1);
+  const recipeRef = useRef(selectedRecipe);
+
   useEffect(() => {
-    // Load local device password on mount
+    isListeningRef.current = isListening;
+    activeStepRef.current = activeStep;
+    recipeRef.current = selectedRecipe;
+  }, [isListening, activeStep, selectedRecipe]);
+
+  useEffect(() => {
+    // Initialize Speech Recognition once on mount
+    if (typeof window !== 'undefined') {
+      const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+      if (SpeechRecognition) {
+        const recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = false;
+
+        recognition.onresult = (event: any) => {
+          const transcript = event.results[event.results.length - 1][0].transcript.toLowerCase();
+          console.log("Heard:", transcript); // Helpful for debugging
+
+          if (transcript.includes("turtle")) {
+            
+            // --- TEXT-TO-SPEECH HELPER ---
+            const speakOutLoud = (text: string) => {
+              if ('speechSynthesis' in window) {
+                window.speechSynthesis.cancel(); 
+                const utterance = new SpeechSynthesisUtterance(text);
+                utterance.rate = 0.9; 
+                window.speechSynthesis.speak(utterance);
+              }
+            };
+
+            // --- FIXED: NOW HANDLES DIGITS AND WRITTEN WORDS ---
+            const stepMatch = transcript.match(/step\s+([0-9]+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty)/);
+
+            if (stepMatch) {
+              const matchedVal = stepMatch[1];
+              let stepNumber = parseInt(matchedVal, 10);
+              
+              // If it's a word like "three", convert it to the number 3
+              if (isNaN(stepNumber)) {
+                const wordsToNumbers: Record<string, number> = { 
+                  one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, 
+                  eleven: 11, twelve: 12, thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, 
+                  eighteen: 18, nineteen: 19, twenty: 20 
+                };
+                stepNumber = wordsToNumbers[matchedVal];
+              }
+
+              const targetIndex = stepNumber - 1; // Convert to 0-based array index
+              
+              if (recipeRef.current?.steps && targetIndex >= 0 && targetIndex < recipeRef.current.steps.length) {
+                setActiveStep(targetIndex);
+                document.getElementById(`recipe-step-${targetIndex}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                speakOutLoud(`Step ${stepNumber}. ${recipeRef.current.steps[targetIndex].text}`);
+              } else {
+                speakOutLoud(`I couldn't find step ${stepNumber}.`);
+              }
+            } 
+            else if (transcript.includes("next") || transcript.includes("forward")) {
+              const maxSteps = recipeRef.current?.steps?.length || 1;
+              const nextStep = Math.min(activeStepRef.current + 1, maxSteps - 1);
+              setActiveStep(nextStep);
+              document.getElementById(`recipe-step-${nextStep}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              
+              if (recipeRef.current?.steps?.[nextStep]) {
+                speakOutLoud(`Step ${nextStep + 1}. ${recipeRef.current.steps[nextStep].text}`);
+              }
+              
+            } else if (transcript.includes("back") || transcript.includes("previous")) {
+              const prevStep = Math.max(activeStepRef.current - 1, 0);
+              setActiveStep(prevStep);
+              document.getElementById(`recipe-step-${prevStep}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+              
+              if (recipeRef.current?.steps?.[prevStep]) {
+                speakOutLoud(`Step ${prevStep + 1}. ${recipeRef.current.steps[prevStep].text}`);
+              }
+              
+            } 
+            // --- FIXED: REMOVED "READ" SO IT DOESN'T FIGHT THE OTHER COMMANDS ---
+            else if (transcript.includes("top") || transcript.includes("ingredient") || transcript.includes("ingredients")) {
+              setActiveStep(-1);
+              window.scrollTo({ top: 0, behavior: 'smooth' });
+              speakOutLoud("Back to the top. Ingredients are on screen.");
+            }
+          }
+        };
+
+        // Mobile browsers kill the mic when quiet; this auto-restarts it if Hands-Free mode is toggled on.
+        recognition.onend = () => {
+          if (isListeningRef.current) {
+            try { recognition.start(); } catch(e){}
+          }
+        };
+
+        recognitionRef.current = recognition;
+      }
+    }
+  }, []);
+
+  const toggleVoiceMode = async () => {
+    if (!recognitionRef.current) {
+      alert("Your browser does not support voice recognition. Please use Safari or Chrome.");
+      return;
+    }
+
+    if (isListening) {
+      setIsListening(false);
+      try { recognitionRef.current.stop(); } catch(e){}
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel(); 
+      if (wakeLockRef.current) { wakeLockRef.current.release(); wakeLockRef.current = null; }
+    } else {
+      setIsListening(true);
+      setActiveStep(-1); // Leave step un-highlighted until she asks for one
+      try { recognitionRef.current.start(); } catch(e){}
+      try {
+        if ('wakeLock' in navigator) {
+          wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+        }
+      } catch (e) { console.error("WakeLock failed:", e); }
+      
+      // Just confirm it is on, don't read the recipe yet
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const startUtterance = new SpeechSynthesisUtterance("Hands free mode activated. Waiting for commands.");
+        startUtterance.rate = 0.9;
+        window.speechSynthesis.speak(startUtterance);
+      }
+    }
+  };
+  useEffect(() => {
     setAppPassword(localStorage.getItem('mamadee_password') || "");
     fetchRecipes();
   }, []);
@@ -735,11 +874,14 @@ export default function MamaDeeApp() {
           `}</style>
 
           <div className="flex justify-between items-center mb-4 md:mb-6 border-b border-[#444] pb-3 md:pb-4 sticky top-0 bg-[#1E1E1E] z-10 pt-2 print:hidden">
-            <button onClick={() => setView('library')} className="flex items-center text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2 px-1">
+            <button onClick={() => { setView('library'); setIsListening(false); }} className="flex items-center text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2 px-1">
               ← Back
             </button>
             <div className="flex gap-2">
-              <button onClick={() => handleShareRecipe(selectedRecipe)} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center" title="Share Recipe">
+              <button onClick={toggleVoiceMode} className={`px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center ${isListening ? 'bg-[#00A023] text-white animate-pulse border border-[#00A023]' : 'bg-[#333] border border-[#555] hover:bg-[#444]'}`} title="Hands-Free Mode">
+                🎙️ <span className="hidden md:inline ml-2">{isListening ? 'Listening...' : 'Hey Turtle'}</span>
+              </button>
+              <button onClick={() => handleShareRecipe(selectedRecipe)} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center border border-[#555]" title="Share Recipe">
                 <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="md:mr-2">
                   <circle cx="18" cy="5" r="3"></circle>
                   <circle cx="6" cy="12" r="3"></circle>
@@ -749,10 +891,10 @@ export default function MamaDeeApp() {
                 </svg>
                 <span className="hidden md:inline">Share</span>
               </button>
-              <button onClick={() => window.print()} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center">
+              <button onClick={() => window.print()} className="bg-[#444] hover:bg-[#555] px-3 md:px-4 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base flex items-center border border-[#555]">
                 📄 PDF
               </button>
-              <button onClick={() => handleEditRecipe(selectedRecipe)} className="bg-[#C53636] hover:bg-[#C95757] px-4 md:px-6 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base">
+              <button onClick={() => { handleEditRecipe(selectedRecipe); setIsListening(false); }} className="bg-[#C53636] hover:bg-[#C95757] px-4 md:px-6 py-2 rounded-md font-bold transition-colors shadow-lg text-sm md:text-base">
                 Edit
               </button>
             </div>
@@ -835,7 +977,11 @@ export default function MamaDeeApp() {
               <h2 className="text-lg md:text-xl font-bold text-gray-400 mb-3 border-b border-[#555] pb-2 uppercase tracking-wide print:text-black print:border-gray-300">Instructions</h2>
               <div className="space-y-6">
                 {selectedRecipe.steps?.length > 0 ? selectedRecipe.steps.map((step, idx) => (
-                  <div key={idx} className="flex gap-3 border-b border-[#444] pb-5 last:border-0 print:border-gray-200 print:break-inside-avoid">
+                  <div 
+                    id={`recipe-step-${idx}`} 
+                    key={idx} 
+                    className={`flex gap-3 border-b border-[#444] pb-5 last:border-0 print:border-gray-200 print:break-inside-avoid transition-all duration-500 rounded-lg p-2 ${activeStep === idx ? 'bg-[#3B8ED0]/20 border border-[#3B8ED0] shadow-[0_0_15px_rgba(59,142,208,0.2)]' : ''}`}
+                  >
                     <div className="font-bold text-xl md:text-2xl text-[#C53636] shrink-0 print:text-black">{idx + 1}.</div>
                     <div className="flex-1 flex flex-col gap-3">
                       <p className="text-base md:text-lg leading-relaxed text-gray-200 print:text-black">{step.text}</p>
@@ -903,8 +1049,9 @@ export default function MamaDeeApp() {
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
             {filteredRecipes.length > 0 ? (
               filteredRecipes.map((recipe) => (
-                // UPDATE THIS LINE TO RESET MULTIPLIER:
-                <div key={recipe.id} onClick={() => { setSelectedRecipe(recipe); setMultiplier(1); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                // --- UPDATE THIS CLICK EVENT ---
+                <div key={recipe.id} onClick={() => { setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                  
                   {/* --- 3-DOT MENU BUTTON --- */}
                   <button
                     onClick={(e) => {

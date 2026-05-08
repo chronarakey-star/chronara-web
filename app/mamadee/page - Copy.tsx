@@ -174,7 +174,7 @@ export default function MamaDeeApp() {
 
   // --- NEW STATE FOR AI FEATURE ---
   const [showAiModal, setShowAiModal] = useState(false);
-  const [aiInputMode, setAiInputMode] = useState<'text' | 'url'>('url');
+  const [aiInputMode, setAiInputMode] = useState<'text' | 'url' | 'upload' | 'camera'>('url');
   const [aiInputText, setAiInputText] = useState("");
   const [aiProcessing, setAiProcessing] = useState(false);
 
@@ -498,14 +498,34 @@ export default function MamaDeeApp() {
 
   const processAiImport = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!aiInputText.trim()) return;
+    let finalContent = aiInputText;
+    let apiType = aiInputMode as string;
+
+    if (aiInputMode === 'upload' || aiInputMode === 'camera') {
+      const inputId = aiInputMode === 'upload' ? 'ai-upload-input' : 'ai-camera-input';
+      const fileInput = document.getElementById(inputId) as HTMLInputElement;
+      const file = fileInput?.files?.[0];
+      
+      if (!file) return alert("Please select or take a photo first.");
+      
+      setAiProcessing(true);
+      const reader = new FileReader();
+      const base64Promise = new Promise((resolve) => {
+        reader.onload = () => resolve(reader.result);
+        reader.readAsDataURL(file);
+      });
+      finalContent = (await base64Promise) as string;
+      apiType = 'image'; // Map both to 'image' for the backend
+    }
+
+    if (!finalContent.trim() && aiInputMode !== 'upload' && aiInputMode !== 'camera') return;
     
     setAiProcessing(true);
     try {
       const res = await fetch('/api/ai-recipe', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ type: aiInputMode, content: aiInputText })
+        body: JSON.stringify({ type: apiType, content: finalContent })
       });
       
       const data = await res.json();
@@ -1070,18 +1090,44 @@ export default function MamaDeeApp() {
             </div>
 
             <form onSubmit={processAiImport} className="space-y-4">
-              <div className="flex gap-2 p-1 bg-[#333] rounded-md">
-                <button type="button" onClick={() => setAiInputMode('url')} className={`flex-1 py-2 text-sm font-bold rounded ${aiInputMode === 'url' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Website URL</button>
-                <button type="button" onClick={() => setAiInputMode('text')} className={`flex-1 py-2 text-sm font-bold rounded ${aiInputMode === 'text' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Paste Text</button>
+              <div className="flex gap-1 p-1 bg-[#333] rounded-md overflow-x-auto">
+                <button type="button" onClick={() => { setAiInputMode('url'); setAiInputText(''); }} className={`flex-1 px-2 py-2 text-xs font-bold rounded whitespace-nowrap ${aiInputMode === 'url' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Website</button>
+                <button type="button" onClick={() => { setAiInputMode('upload'); setAiInputText(''); }} className={`flex-1 px-2 py-2 text-xs font-bold rounded whitespace-nowrap ${aiInputMode === 'upload' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Upload Photo</button>
+                <button type="button" onClick={() => { setAiInputMode('camera'); setAiInputText(''); }} className={`flex-1 px-2 py-2 text-xs font-bold rounded whitespace-nowrap ${aiInputMode === 'camera' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Take Photo</button>
+                <button type="button" onClick={() => { setAiInputMode('text'); setAiInputText(''); }} className={`flex-1 px-2 py-2 text-xs font-bold rounded whitespace-nowrap ${aiInputMode === 'text' ? 'bg-[#3B8ED0] text-white shadow' : 'text-gray-400 hover:text-white'}`}>Paste Text</button>
               </div>
 
-              {aiInputMode === 'url' ? (
+              {aiInputMode === 'url' && (
                 <div>
                   <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Recipe Link</label>
                   <input type="url" required value={aiInputText} onChange={(e) => setAiInputText(e.target.value)} placeholder="https://..." className="w-full bg-[#2D2D2D] border border-[#555] rounded-md p-3 text-white focus:border-[#3B8ED0] outline-none"/>
                   <p className="text-xs text-gray-500 mt-2">Paste a link to any food blog. The AI will read the site and extract the ingredients and instructions automatically.</p>
                 </div>
-              ) : (
+              )}
+
+              {aiInputMode === 'upload' && (
+                <div className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-[#555] rounded-xl bg-[#2D2D2D]">
+                  <label className="bg-[#333] hover:bg-[#444] px-6 py-3 rounded-md cursor-pointer text-sm font-bold border border-[#555] transition-colors text-center w-full">
+                    📁 Choose File
+                    <input type="file" id="ai-upload-input" accept="image/*" className="hidden" onChange={() => setAiInputText("photo_selected")} />
+                  </label>
+                  {aiInputText === "photo_selected" && <p className="text-[#00A023] text-xs mt-3 font-bold">✓ Photo ready to scan</p>}
+                  <p className="text-xs text-gray-500 mt-4 text-center">Select an existing photo of a recipe card or clipping.</p>
+                </div>
+              )}
+
+              {aiInputMode === 'camera' && (
+                <div className="flex flex-col items-center justify-center p-8 border-2 border-dashed border-[#555] rounded-xl bg-[#2D2D2D]">
+                  <label className="bg-[#333] hover:bg-[#444] px-6 py-3 rounded-md cursor-pointer text-sm font-bold border border-[#555] transition-colors text-center w-full">
+                    📸 Open Camera
+                    <input type="file" id="ai-camera-input" accept="image/*" capture="environment" className="hidden" onChange={() => setAiInputText("photo_selected")} />
+                  </label>
+                  {aiInputText === "photo_selected" && <p className="text-[#00A023] text-xs mt-3 font-bold">✓ Photo ready to scan</p>}
+                  <p className="text-xs text-gray-500 mt-4 text-center">Snap a fresh picture of a recipe right now.</p>
+                </div>
+              )}
+
+              {aiInputMode === 'text' && (
                 <div>
                   <label className="block text-xs font-bold text-gray-400 mb-1 uppercase tracking-wider">Raw Text</label>
                   <textarea required value={aiInputText} onChange={(e) => setAiInputText(e.target.value)} placeholder="Paste messy email text, ingredients, etc..." className="w-full bg-[#2D2D2D] border border-[#555] rounded-md p-3 text-white focus:border-[#3B8ED0] outline-none h-48 resize-none"/>
@@ -1090,7 +1136,7 @@ export default function MamaDeeApp() {
 
               <div className="flex gap-3 justify-end pt-4 border-t border-[#444]">
                 <button type="button" onClick={() => setShowAiModal(false)} disabled={aiProcessing} className="px-4 py-2 text-gray-400 hover:text-white font-bold disabled:opacity-50">Cancel</button>
-                <button type="submit" disabled={aiProcessing || !aiInputText.trim()} className="bg-[#3B8ED0] hover:bg-[#2b6a9e] disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-md font-bold text-white shadow-lg flex items-center gap-2">
+                <button type="submit" disabled={aiProcessing || (!aiInputText.trim() && aiInputMode !== 'upload' && aiInputMode !== 'camera') || (aiInputText !== 'photo_selected' && (aiInputMode === 'upload' || aiInputMode === 'camera'))} className="bg-[#3B8ED0] hover:bg-[#2b6a9e] disabled:opacity-50 disabled:cursor-not-allowed px-6 py-2 rounded-md font-bold text-white shadow-lg flex items-center gap-2">
                   {aiProcessing ? (
                     <><span className="animate-spin">⏳</span> Scanning...</>
                   ) : 'Extract Recipe'}
