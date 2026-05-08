@@ -1,7 +1,8 @@
 // app/api/ai-recipe/route.ts
 import { NextResponse } from 'next/server';
 
-const GEMINI_API_KEY = "AIzaSyAyIXnBHDjJ8oUaqAiH8cmXTwTHx6AK1u0";
+// Pulls the key securely from your hidden .env.local file
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
 export async function POST(req: Request) {
   try {
@@ -9,14 +10,19 @@ export async function POST(req: Request) {
 
     let textToParse = content;
     if (type === 'url') {
+      // Upgraded User-Agent so food blogs don't block the scraper as a "bot"
       const response = await fetch(content, {
-        headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' }
+        headers: { 
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+        }
       });
-      if (!response.ok) throw new Error("Failed to fetch the website content.");
+      if (!response.ok) throw new Error(`Website blocked the request. Status: ${response.status}`);
       textToParse = await response.text(); 
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}`;
+    // MATCHING CHRONARA KEY: Upgraded to Gemini 2.5 Pro
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-pro:generateContent?key=${GEMINI_API_KEY}`;
 
     const prompt = `
     You are an expert culinary AI. Extract the recipe from the following text or HTML.
@@ -29,17 +35,18 @@ export async function POST(req: Request) {
       "cook_min": 30,
       "categories": ["Dinner"],
       "ingredients": [
-        { "quantity": 1, "unit": "cup", "name": "flour", "notes": "sifted" }
+        { "quantity": 1, "unit": "cup", "name": "Flour", "notes": "sifted" }
       ],
       "steps": [
         { "text": "First step instructions..." }
       ]
     }
     
-    CRITICAL UNIT RULES:
-    For the "unit" field in ingredients, you MUST use ONLY the following exact strings:
+    CRITICAL FORMATTING RULES:
+    1. UNITS: For the "unit" field in ingredients, you MUST use ONLY the following exact strings:
     'g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice', or "" (empty string).
-    Convert full words to these abbreviations automatically (e.g., "teaspoon" -> "tsp", "tablespoons" -> "tbsp", "grams" -> "g", "ounces" -> "oz", "pounds" -> "lb", "milliliters" -> "ml").
+    Convert full words to these abbreviations automatically (e.g., "teaspoon" -> "tsp", "tablespoons" -> "tbsp").
+    2. INGREDIENT NAMES: You MUST format all ingredient "name" fields in Title Case (e.g., "Pizza Dough", "Unsalted Butter", "Salt"). Do not leave them entirely lowercase.
     
     If a field is unknown, use 0 for numbers, "" for strings, and [] for arrays. Keep instructions concise and clean.
     
@@ -56,8 +63,27 @@ export async function POST(req: Request) {
     });
 
     const aiData = await aiRes.json();
-    let rawJson = aiData.candidates[0].content.parts[0].text.trim();
 
+    // --- STRICT ERROR HANDLING ---
+    // 1. Did the API return a hard error? (e.g., Quota exceeded, Bad API Key, Wrong Model)
+    if (aiData.error) {
+      throw new Error(`Gemini API Error: ${aiData.error.message}`);
+    }
+
+    // 2. Did Gemini block the prompt for safety reasons?
+    if (!aiData.candidates || aiData.candidates.length === 0) {
+      console.error("Empty AI Data:", JSON.stringify(aiData, null, 2));
+      throw new Error("Gemini returned an empty response. The content may have been blocked by safety filters.");
+    }
+
+    let rawJson = aiData.candidates[0].content?.parts?.[0]?.text;
+    
+    if (!rawJson) {
+      throw new Error("AI successfully connected, but failed to generate text.");
+    }
+
+    // Clean up markdown wrapping if the AI includes it
+    rawJson = rawJson.trim();
     if (rawJson.startsWith('```json')) rawJson = rawJson.slice(7);
     if (rawJson.startsWith('```')) rawJson = rawJson.slice(3);
     if (rawJson.endsWith('```')) rawJson = rawJson.slice(0, -3);

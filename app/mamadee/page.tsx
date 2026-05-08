@@ -40,6 +40,33 @@ const QUANTITY_OPTIONS = [
 ];
 const UNIT_OPTIONS = ['g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice'];
 
+// --- NEW FRACTION FORMATTER (UNICODE NATIVE) ---
+const formatFraction = (val: number | string) => {
+  const num = typeof val === 'string' ? parseFloat(val) : val;
+  if (isNaN(num)) return val;
+
+  const whole = Math.floor(num);
+  const decimal = num - whole;
+
+  let fraction = "";
+  const eps = 0.02; // Tolerance for decimals like 0.33333
+
+  if (decimal < eps) return whole.toString();
+  
+  if (Math.abs(decimal - 0.125) < eps) fraction = "⅛";
+  else if (Math.abs(decimal - 0.25) < eps) fraction = "¼";
+  else if (Math.abs(decimal - 0.33) < eps) fraction = "⅓";
+  else if (Math.abs(decimal - 0.5) < eps) fraction = "½";
+  else if (Math.abs(decimal - 0.66) < eps) fraction = "⅔";
+  else if (Math.abs(decimal - 0.75) < eps) fraction = "¾";
+
+  // If it's a weird decimal that doesn't map to a cooking fraction, just show the number
+  if (!fraction) return num.toString();
+
+  // Combine whole number and fraction (e.g., "2 ¼" or just "¼")
+  return whole > 0 ? `${whole} ${fraction}` : fraction;
+};
+
 // ============================================================================
 // HELPER COMPONENT: INLINE AUDIO RECORDER
 // ============================================================================
@@ -747,7 +774,9 @@ export default function MamaDeeApp() {
                     <div className="flex items-start leading-tight">
                       <span className="text-[#C53636] mr-2 font-bold text-lg print:text-black">•</span>
                       <span className="text-base md:text-lg pt-0.5 print:text-black">
-                        <strong className="text-[#C53636] print:text-black">{ing.quantity} {ing.unit}</strong> {ing.name}
+                        <strong className="text-[#C53636] print:text-black">
+                          {formatFraction(ing.quantity)} {ing.unit}
+                        </strong> {ing.name}
                         {ing.notes && <span className="text-gray-500 text-sm ml-1 italic block sm:inline print:text-gray-600">({ing.notes})</span>}
                       </span>
                     </div>
