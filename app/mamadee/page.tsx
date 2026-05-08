@@ -222,7 +222,11 @@ export default function MamaDeeApp() {
   };
 
   const handleSavePassword = (newPass: string) => {
-    localStorage.setItem('mamadee_password', newPass);
+    if (newPass === "") {
+      localStorage.removeItem('mamadee_password');
+    } else {
+      localStorage.setItem('mamadee_password', newPass);
+    }
     setAppPassword(newPass);
     alert(newPass === "" ? "Password removed!" : "Password updated successfully!");
   };
@@ -938,10 +942,16 @@ export default function MamaDeeApp() {
                   placeholder={appPassword ? "Enter new password to change..." : "Set a password..."} 
                   className="w-full bg-[#333] border border-[#555] rounded-md p-3 text-white focus:border-[#C53636] outline-none"
                   onKeyDown={(e) => {
-                    if (e.key === 'Enter') handleSavePassword(e.currentTarget.value);
+                    if (e.key === 'Enter') {
+                      handleSavePassword(e.currentTarget.value);
+                      e.currentTarget.value = ""; // Clear the box after saving
+                    }
                   }}
                   onBlur={(e) => {
-                    if (e.target.value) handleSavePassword(e.target.value);
+                    if (e.target.value) {
+                      handleSavePassword(e.target.value);
+                      e.target.value = ""; // Clear the box after saving
+                    }
                   }}
                 />
                 {appPassword && (
