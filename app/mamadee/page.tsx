@@ -1186,7 +1186,7 @@ export default function MamaDeeApp() {
             </div>
             {/* NEW CONVERTER BUTTON */}
             <button onClick={() => setView('converter')} className="w-full max-w-[200px] md:max-w-[264px] bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center">
-              🔄 Kitchen Math
+              🔄 Converter
             </button>
           </div>
         </div>
