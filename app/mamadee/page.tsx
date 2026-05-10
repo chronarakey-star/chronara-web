@@ -184,7 +184,7 @@ export default function MamaDeeApp() {
   const [multiplier, setMultiplier] = useState<number>(1);
 
   // New Converter States
-  const [convAmount, setConvAmount] = useState<number | string>(1);
+  const [convInput, setConvInput] = useState<{val: number | string, source: 'top' | 'bottom'}>({ val: 1, source: 'top' });
   const [convFrom, setConvFrom] = useState<string>("cup");
   const [convTo, setConvTo] = useState<string>("ml");
   
@@ -1082,8 +1082,19 @@ export default function MamaDeeApp() {
     // VIEW: CONVERTER
     // ----------------------------------------------------------------------------
     if (view === 'converter') {
-      const conversionResult = doConversion(Number(convAmount), convFrom, convTo);
+      let topDisplay: string | number | null = "";
+      let bottomDisplay: string | number | null = "";
       
+      // If the box is empty, don't try to calculate a zero
+      if (convInput.val === "") {
+        topDisplay = "";
+        bottomDisplay = "";
+      } else {
+        // Whichever box she typed in gets the raw value, the other calculates the math
+        topDisplay = convInput.source === 'top' ? convInput.val : doConversion(Number(convInput.val), convTo, convFrom);
+        bottomDisplay = convInput.source === 'bottom' ? convInput.val : doConversion(Number(convInput.val), convFrom, convTo);
+      }
+
       return (
         <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8 pb-24">
           <div className="max-w-xl mx-auto">
@@ -1101,11 +1112,11 @@ export default function MamaDeeApp() {
                 <label className="text-xs font-bold text-[#C53636] uppercase tracking-widest">Convert This</label>
                 <div className="flex flex-col sm:flex-row gap-3">
                   <input 
-                    type="number" 
+                    type={topDisplay === null ? "text" : "number"}
                     step="any"
-                    value={convAmount}
-                    onChange={(e) => setConvAmount(e.target.value)}
-                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-3xl font-bold text-center outline-none focus:border-[#C53636] shadow-inner"
+                    value={topDisplay === null ? "Incompatible" : topDisplay}
+                    onChange={(e) => setConvInput({ val: e.target.value, source: 'top' })}
+                    className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${topDisplay === null ? 'border-red-900 bg-red-900/10 text-red-500 text-sm' : 'border-[#555] text-white text-3xl'} rounded-lg p-4 font-bold text-center outline-none focus:border-[#C53636] shadow-inner transition-all`}
                   />
                   <select 
                     value={convFrom}
@@ -1117,20 +1128,26 @@ export default function MamaDeeApp() {
                 </div>
               </div>
 
-              {/* ARROW */}
+              {/* DOUBLE ARROW */}
               <div className="flex justify-center -my-4 text-[#555]">
-                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="4" x2="12" y2="20"></line>
+                  <polyline points="18 14 12 20 6 14"></polyline>
+                  <polyline points="18 10 12 4 6 10"></polyline>
+                </svg>
               </div>
 
               {/* TO */}
               <div className="flex flex-col gap-3">
                 <label className="text-xs font-bold text-[#00A023] uppercase tracking-widest">Into This</label>
                 <div className="flex flex-col sm:flex-row gap-3">
-                  <div className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${conversionResult === null ? 'border-red-900 bg-red-900/10' : 'border-[#555]'} rounded-lg p-4 flex items-center justify-center overflow-hidden shadow-inner min-h-[70px]`}>
-                     <span className={`text-3xl font-bold text-center ${conversionResult === null ? 'text-red-500 text-sm' : 'text-white'}`}>
-                        {conversionResult === null ? "Incompatible" : conversionResult}
-                     </span>
-                  </div>
+                  <input 
+                    type={bottomDisplay === null ? "text" : "number"}
+                    step="any"
+                    value={bottomDisplay === null ? "Incompatible" : bottomDisplay}
+                    onChange={(e) => setConvInput({ val: e.target.value, source: 'bottom' })}
+                    className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${bottomDisplay === null ? 'border-red-900 bg-red-900/10 text-red-500 text-sm' : 'border-[#555] text-white text-3xl'} rounded-lg p-4 font-bold text-center outline-none focus:border-[#00A023] shadow-inner transition-all`}
+                  />
                   <select 
                     value={convTo}
                     onChange={(e) => setConvTo(e.target.value)}
@@ -1141,7 +1158,7 @@ export default function MamaDeeApp() {
                 </div>
               </div>
               
-              {conversionResult === null && (
+              {(topDisplay === null || bottomDisplay === null) && (
                 <p className="text-[#C53636] text-sm font-bold text-center bg-[#C53636]/10 py-2 rounded border border-[#C53636]/30">You cannot convert between weight, volume, or temperature.</p>
               )}
             </div>
@@ -1156,37 +1173,37 @@ export default function MamaDeeApp() {
     return (
       <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8">
         
-        {/* --- HEADER WRAPPER (Restored) --- */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6 gap-4">
+        {/* --- HEADER WRAPPER (Mobile Optimized) --- */}
+        <div className="flex flex-row justify-between items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6 gap-2">
           
           {/* LOGO AND TITLE */}
-          <div className="flex items-center gap-3 md:gap-4">
-            <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-10 h-10 md:w-12 md:h-12 object-contain drop-shadow-md" />
-            <h1 className="text-xl md:text-4xl font-bold text-[#C53636] leading-tight">Mama Dee's Recipes</h1>
+          <div className="flex items-center gap-2 md:gap-4 overflow-hidden">
+            <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-8 h-8 md:w-12 md:h-12 object-contain drop-shadow-md shrink-0" />
+            <h1 className="text-lg sm:text-xl md:text-4xl font-bold text-[#C53636] leading-tight truncate">
+              Mama Dee's Recipes
+            </h1>
           </div>
 
           {/* BUTTONS */}
-          <div className="flex flex-col gap-2 items-end w-full md:w-auto">
-            <div className="flex gap-2 items-center">
-              <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-2 flex items-center justify-center shrink-0">
-                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <circle cx="18" cy="5" r="3"></circle>
-                  <circle cx="6" cy="12" r="3"></circle>
-                  <circle cx="18" cy="19" r="3"></circle>
-                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
-                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
-                </svg>
-              </button>
-              <button onClick={() => requireAuth('settings')} className="w-24 md:w-32 bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center shrink-0">
-                ⚙️ Settings
-              </button>
-              <button onClick={handleAddRecipe} className="w-24 md:w-32 bg-[#C53636] hover:bg-[#C95757] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base text-center shrink-0">
-                + Add
-              </button>
-            </div>
-            {/* NEW CONVERTER BUTTON */}
-            <button onClick={() => setView('converter')} className="w-full max-w-[200px] md:max-w-[264px] bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center">
-              🔄 Converter
+          <div className="flex gap-1.5 md:gap-3 items-center shrink-0">
+            <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-1 md:p-2 flex items-center justify-center shrink-0">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="18" cy="5" r="3"></circle>
+                <circle cx="6" cy="12" r="3"></circle>
+                <circle cx="18" cy="19" r="3"></circle>
+                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+              </svg>
+            </button>
+            <button onClick={() => setView('converter')} title="Kitchen Math" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
+              🔄<span className="hidden md:inline md:ml-2">Math</span>
+            </button>
+            <button onClick={() => requireAuth('settings')} title="Settings" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
+              ⚙️<span className="hidden md:inline md:ml-2">Settings</span>
+            </button>
+            <button onClick={handleAddRecipe} title="Add Recipe" className="bg-[#C53636] hover:bg-[#C95757] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base flex items-center justify-center shrink-0">
+              <span className="md:hidden text-lg leading-none">+</span>
+              <span className="hidden md:inline">+ Add</span>
             </button>
           </div>
         </div>
