@@ -1066,7 +1066,13 @@ export default function MamaDeeApp() {
         </div>
 
         <div className="mb-6 flex flex-col md:flex-row gap-3 md:gap-4">
-          <input type="text" className="flex-1 bg-[#333] border border-[#444] rounded-md p-3 md:p-4 text-white outline-none focus:border-[#C53636] transition-colors shadow-inner" placeholder="🔍 Search recipes by title..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <input 
+            type="text" 
+            className="flex-1 bg-[#333] border border-[#444] rounded-md p-3 md:p-4 text-white outline-none focus:border-[#C53636] transition-colors shadow-inner" 
+            placeholder={`🔍 Search ${recipes.length} recipes...`} 
+            value={searchQuery} 
+            onChange={(e) => setSearchQuery(e.target.value)} 
+          />
           
           <select
             value={selectedCategoryFilter}
