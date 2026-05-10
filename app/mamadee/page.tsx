@@ -40,6 +40,42 @@ const QUANTITY_OPTIONS = [
 ];
 const UNIT_OPTIONS = ['g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice'];
 
+// ============================================================================
+// CONVERTER CONSTANTS & MATH ENGINE
+// ============================================================================
+const KITCHEN_CONVERSIONS = {
+  volume: { ml: 1, tsp: 4.92892, tbsp: 14.7868, 'fl oz': 29.5735, cup: 236.588, pint: 473.176, quart: 946.353, l: 1000, gal: 3785.41 },
+  weight: { g: 1, oz: 28.3495, lb: 453.592, kg: 1000 },
+  temperature: { C: 'temp', F: 'temp' }
+};
+
+const CONVERTER_OPTIONS = [
+  ...Object.keys(KITCHEN_CONVERSIONS.volume),
+  ...Object.keys(KITCHEN_CONVERSIONS.weight),
+  ...Object.keys(KITCHEN_CONVERSIONS.temperature)
+];
+
+const doConversion = (amount: number, from: string, to: string): string | null => {
+  if (from === to) return amount.toString();
+  
+  if (from === 'C' && to === 'F') return ((amount * 9/5) + 32).toFixed(1);
+  if (from === 'F' && to === 'C') return ((amount - 32) * 5/9).toFixed(1);
+  
+  if (from in KITCHEN_CONVERSIONS.volume && to in KITCHEN_CONVERSIONS.volume) {
+    const inMl = amount * KITCHEN_CONVERSIONS.volume[from as keyof typeof KITCHEN_CONVERSIONS.volume];
+    const result = inMl / KITCHEN_CONVERSIONS.volume[to as keyof typeof KITCHEN_CONVERSIONS.volume];
+    return result < 10 ? result.toFixed(2) : result.toFixed(1);
+  }
+  
+  if (from in KITCHEN_CONVERSIONS.weight && to in KITCHEN_CONVERSIONS.weight) {
+    const inG = amount * KITCHEN_CONVERSIONS.weight[from as keyof typeof KITCHEN_CONVERSIONS.weight];
+    const result = inG / KITCHEN_CONVERSIONS.weight[to as keyof typeof KITCHEN_CONVERSIONS.weight];
+    return result < 10 ? result.toFixed(2) : result.toFixed(1);
+  }
+  
+  return null;
+};
+
 // --- NEW FRACTION FORMATTER (UNICODE NATIVE) ---
 const formatFraction = (val: number | string) => {
   const num = typeof val === 'string' ? parseFloat(val) : val;
@@ -60,10 +96,7 @@ const formatFraction = (val: number | string) => {
   else if (Math.abs(decimal - 0.66) < eps) fraction = "⅔";
   else if (Math.abs(decimal - 0.75) < eps) fraction = "¾";
 
-  // If it's a weird decimal that doesn't map to a cooking fraction, just show the number
   if (!fraction) return num.toString();
-
-  // Combine whole number and fraction (e.g., "2 ¼" or just "¼")
   return whole > 0 ? `${whole} ${fraction}` : fraction;
 };
 
@@ -143,10 +176,17 @@ const AudioRecorder = ({ onUploadSuccess }: { onUploadSuccess: (url: string) => 
 // ============================================================================
 export default function MamaDeeApp() {
   const router = useRouter();
-  const [view, setView] = useState<'library' | 'cook' | 'edit'>('library');
+  
+  // Added 'converter' to the view types
+  const [view, setView] = useState<'library' | 'cook' | 'edit' | 'converter'>('library');
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   const [multiplier, setMultiplier] = useState<number>(1);
+
+  // New Converter States
+  const [convAmount, setConvAmount] = useState<number | string>(1);
+  const [convFrom, setConvFrom] = useState<string>("cup");
+  const [convTo, setConvTo] = useState<string>("ml");
   
   // State for the 3-dot menu
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -1036,34 +1076,121 @@ export default function MamaDeeApp() {
       );
     }
 
+
+
+    // ----------------------------------------------------------------------------
+    // VIEW: CONVERTER
+    // ----------------------------------------------------------------------------
+    if (view === 'converter') {
+      const conversionResult = doConversion(Number(convAmount), convFrom, convTo);
+      
+      return (
+        <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8 pb-24">
+          <div className="max-w-xl mx-auto">
+            <div className="flex justify-between items-center mb-8 border-b border-[#444] pb-4 sticky top-0 bg-[#1E1E1E] z-10">
+              <button onClick={() => setView('library')} className="text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2">
+                ← Back
+              </button>
+              <h2 className="text-xl md:text-2xl font-bold truncate px-2 text-white">Kitchen Math</h2>
+              <div className="w-12"></div>
+            </div>
+
+            <div className="bg-[#2D2D2D] rounded-xl p-6 md:p-8 shadow-2xl border border-[#444] flex flex-col gap-8">
+              {/* FROM */}
+              <div className="flex flex-col gap-3">
+                <label className="text-xs font-bold text-[#C53636] uppercase tracking-widest">Convert This</label>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input 
+                    type="number" 
+                    step="any"
+                    value={convAmount}
+                    onChange={(e) => setConvAmount(e.target.value)}
+                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-3xl font-bold text-center outline-none focus:border-[#C53636] shadow-inner"
+                  />
+                  <select 
+                    value={convFrom}
+                    onChange={(e) => setConvFrom(e.target.value)}
+                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-xl font-bold outline-none focus:border-[#C53636] text-center cursor-pointer shadow-inner appearance-none"
+                  >
+                    {CONVERTER_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.toUpperCase()}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* ARROW */}
+              <div className="flex justify-center -my-4 text-[#555]">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><polyline points="19 12 12 19 5 12"></polyline></svg>
+              </div>
+
+              {/* TO */}
+              <div className="flex flex-col gap-3">
+                <label className="text-xs font-bold text-[#00A023] uppercase tracking-widest">Into This</label>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <div className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${conversionResult === null ? 'border-red-900 bg-red-900/10' : 'border-[#555]'} rounded-lg p-4 flex items-center justify-center overflow-hidden shadow-inner min-h-[70px]`}>
+                     <span className={`text-3xl font-bold text-center ${conversionResult === null ? 'text-red-500 text-sm' : 'text-white'}`}>
+                        {conversionResult === null ? "Incompatible" : conversionResult}
+                     </span>
+                  </div>
+                  <select 
+                    value={convTo}
+                    onChange={(e) => setConvTo(e.target.value)}
+                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-xl font-bold outline-none focus:border-[#00A023] text-center cursor-pointer shadow-inner appearance-none"
+                  >
+                    {CONVERTER_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.toUpperCase()}</option>)}
+                  </select>
+                </div>
+              </div>
+              
+              {conversionResult === null && (
+                <p className="text-[#C53636] text-sm font-bold text-center bg-[#C53636]/10 py-2 rounded border border-[#C53636]/30">You cannot convert between weight, volume, or temperature.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    
     // ----------------------------------------------------------------------------
     // VIEW: LIBRARY
     // ----------------------------------------------------------------------------
     return (
       <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8">
-        <div className="flex justify-between items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6">
+        
+        {/* --- HEADER WRAPPER (Restored) --- */}
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6 gap-4">
+          
+          {/* LOGO AND TITLE */}
           <div className="flex items-center gap-3 md:gap-4">
             <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-10 h-10 md:w-12 md:h-12 object-contain drop-shadow-md" />
             <h1 className="text-xl md:text-4xl font-bold text-[#C53636] leading-tight">Mama Dee's Recipes</h1>
           </div>
-          <div className="flex gap-2 items-center">
-            <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-2 flex items-center justify-center shrink-0">
-              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="18" cy="5" r="3"></circle>
-                <circle cx="6" cy="12" r="3"></circle>
-                <circle cx="18" cy="19" r="3"></circle>
-                <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
-                <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
-              </svg>
-            </button>
-            <button onClick={() => requireAuth('settings')} className="w-24 md:w-32 bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center shrink-0">
-              ⚙️ Settings
-            </button>
-            <button onClick={handleAddRecipe} className="w-24 md:w-32 bg-[#C53636] hover:bg-[#C95757] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base text-center shrink-0">
-              + Add
+
+          {/* BUTTONS */}
+          <div className="flex flex-col gap-2 items-end w-full md:w-auto">
+            <div className="flex gap-2 items-center">
+              <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-2 flex items-center justify-center shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <circle cx="18" cy="5" r="3"></circle>
+                  <circle cx="6" cy="12" r="3"></circle>
+                  <circle cx="18" cy="19" r="3"></circle>
+                  <line x1="8.59" y1="13.51" x2="15.42" y2="17.49"></line>
+                  <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
+                </svg>
+              </button>
+              <button onClick={() => requireAuth('settings')} className="w-24 md:w-32 bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center shrink-0">
+                ⚙️ Settings
+              </button>
+              <button onClick={handleAddRecipe} className="w-24 md:w-32 bg-[#C53636] hover:bg-[#C95757] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base text-center shrink-0">
+                + Add
+              </button>
+            </div>
+            {/* NEW CONVERTER BUTTON */}
+            <button onClick={() => setView('converter')} className="w-full max-w-[200px] md:max-w-[264px] bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center">
+              🔄 Kitchen Math
             </button>
           </div>
         </div>
+        {/* --- END HEADER WRAPPER --- */}
 
         <div className="mb-6 flex flex-col md:flex-row gap-3 md:gap-4">
           <input 
