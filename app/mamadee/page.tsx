@@ -224,6 +224,7 @@ export default function MamaDeeApp() {
   const recognitionRef = useRef<any>(null);
   const wakeLockRef = useRef<any>(null);
   const libraryScrollYRef = useRef<number | null>(null);
+  const libraryRestoreRecipeIdRef = useRef<string | null>(null);
   
   // Refs to prevent stale closures in the voice event listener
   const isListeningRef = useRef(false);
@@ -364,17 +365,7 @@ export default function MamaDeeApp() {
     fetchRecipes();
   }, []);
 
-  useEffect(() => {
-    if (view !== 'library' || libraryScrollYRef.current === null) return;
 
-    const savedY = libraryScrollYRef.current;
-
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        window.scrollTo({ top: savedY, behavior: 'auto' });
-      });
-    });
-  }, [view, recipes.length, searchQuery, selectedCategoryFilter]);
 
   const fetchRecipes = async () => {
     setLoading(true);
@@ -416,6 +407,44 @@ export default function MamaDeeApp() {
     const matchesCategory = selectedCategoryFilter === "" || (r.categories || []).includes(selectedCategoryFilter);
     return matchesSearch && matchesCategory;
   });
+
+  useEffect(() => {
+    if (view !== 'library') return;
+
+    const savedRecipeId = libraryRestoreRecipeIdRef.current;
+    const savedY = libraryScrollYRef.current;
+
+    if (!savedRecipeId && savedY === null) return;
+
+    const restoreScroll = () => {
+      if (savedRecipeId) {
+        const card = document.getElementById(`recipe-card-${savedRecipeId}`);
+        if (card) {
+          card.scrollIntoView({ behavior: 'auto', block: 'start' });
+
+          window.scrollBy({
+            top: -16,
+            left: 0,
+            behavior: 'auto'
+          });
+
+          return;
+        }
+      }
+
+      if (savedY !== null) {
+        window.scrollTo({ top: savedY, behavior: 'auto' });
+      }
+    };
+
+    requestAnimationFrame(() => {
+      restoreScroll();
+
+      setTimeout(restoreScroll, 50);
+      setTimeout(restoreScroll, 150);
+      setTimeout(restoreScroll, 300);
+    });
+  }, [view, recipes.length, filteredRecipes.length]);
 
   // ============================================================================
   // AUTH & SETTINGS LOGIC
@@ -1291,7 +1320,7 @@ export default function MamaDeeApp() {
             {filteredRecipes.length > 0 ? (
               filteredRecipes.map((recipe) => (
                 // --- UPDATE THIS CLICK EVENT ---
-                <div key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                <div id={`recipe-card-${recipe.id}`} key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; libraryRestoreRecipeIdRef.current = String(recipe.id); setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
                   
                   {/* --- 3-DOT MENU BUTTON --- */}
                   <button
