@@ -40,6 +40,42 @@ const QUANTITY_OPTIONS = [
 ];
 const UNIT_OPTIONS = ['g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice'];
 
+// ============================================================================
+// CONVERTER CONSTANTS & MATH ENGINE
+// ============================================================================
+const KITCHEN_CONVERSIONS = {
+  volume: { ml: 1, tsp: 4.92892, tbsp: 14.7868, 'fl oz': 29.5735, cup: 236.588, pint: 473.176, quart: 946.353, l: 1000, gal: 3785.41 },
+  weight: { g: 1, oz: 28.3495, lb: 453.592, kg: 1000 },
+  temperature: { C: 'temp', F: 'temp' }
+};
+
+const CONVERTER_OPTIONS = [
+  ...Object.keys(KITCHEN_CONVERSIONS.volume),
+  ...Object.keys(KITCHEN_CONVERSIONS.weight),
+  ...Object.keys(KITCHEN_CONVERSIONS.temperature)
+];
+
+const doConversion = (amount: number, from: string, to: string): string | null => {
+  if (from === to) return amount.toString();
+  
+  if (from === 'C' && to === 'F') return ((amount * 9/5) + 32).toFixed(1);
+  if (from === 'F' && to === 'C') return ((amount - 32) * 5/9).toFixed(1);
+  
+  if (from in KITCHEN_CONVERSIONS.volume && to in KITCHEN_CONVERSIONS.volume) {
+    const inMl = amount * KITCHEN_CONVERSIONS.volume[from as keyof typeof KITCHEN_CONVERSIONS.volume];
+    const result = inMl / KITCHEN_CONVERSIONS.volume[to as keyof typeof KITCHEN_CONVERSIONS.volume];
+    return result < 10 ? result.toFixed(2) : result.toFixed(1);
+  }
+  
+  if (from in KITCHEN_CONVERSIONS.weight && to in KITCHEN_CONVERSIONS.weight) {
+    const inG = amount * KITCHEN_CONVERSIONS.weight[from as keyof typeof KITCHEN_CONVERSIONS.weight];
+    const result = inG / KITCHEN_CONVERSIONS.weight[to as keyof typeof KITCHEN_CONVERSIONS.weight];
+    return result < 10 ? result.toFixed(2) : result.toFixed(1);
+  }
+  
+  return null;
+};
+
 // --- NEW FRACTION FORMATTER (UNICODE NATIVE) ---
 const formatFraction = (val: number | string) => {
   const num = typeof val === 'string' ? parseFloat(val) : val;
@@ -60,10 +96,7 @@ const formatFraction = (val: number | string) => {
   else if (Math.abs(decimal - 0.66) < eps) fraction = "⅔";
   else if (Math.abs(decimal - 0.75) < eps) fraction = "¾";
 
-  // If it's a weird decimal that doesn't map to a cooking fraction, just show the number
   if (!fraction) return num.toString();
-
-  // Combine whole number and fraction (e.g., "2 ¼" or just "¼")
   return whole > 0 ? `${whole} ${fraction}` : fraction;
 };
 
@@ -143,10 +176,17 @@ const AudioRecorder = ({ onUploadSuccess }: { onUploadSuccess: (url: string) => 
 // ============================================================================
 export default function MamaDeeApp() {
   const router = useRouter();
-  const [view, setView] = useState<'library' | 'cook' | 'edit'>('library');
+  
+  // Added 'converter' to the view types
+  const [view, setView] = useState<'library' | 'cook' | 'edit' | 'converter'>('library');
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
   const [multiplier, setMultiplier] = useState<number>(1);
+
+  // New Converter States
+  const [convInput, setConvInput] = useState<{val: number | string, source: 'top' | 'bottom'}>({ val: 1, source: 'top' });
+  const [convFrom, setConvFrom] = useState<string>("cup");
+  const [convTo, setConvTo] = useState<string>("ml");
   
   // State for the 3-dot menu
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -648,13 +688,56 @@ export default function MamaDeeApp() {
       if (!file) return alert("Please select or take a photo first.");
       
       setAiProcessing(true);
-      const reader = new FileReader();
-      const base64Promise = new Promise((resolve) => {
-        reader.onload = () => resolve(reader.result);
-        reader.readAsDataURL(file);
-      });
-      finalContent = (await base64Promise) as string;
-      apiType = 'image'; // Map both to 'image' for the backend
+
+      try {
+        // Intercept and compress the image using HTML5 Canvas
+        const compressedBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              const MAX_WIDTH = 1200; // Cap resolution for OCR
+              const MAX_HEIGHT = 1200;
+              let width = img.width;
+              let height = img.height;
+
+              // Maintain aspect ratio
+              if (width > height) {
+                if (width > MAX_WIDTH) {
+                  height *= MAX_WIDTH / width;
+                  width = MAX_WIDTH;
+                }
+              } else {
+                if (height > MAX_HEIGHT) {
+                  width *= MAX_HEIGHT / height;
+                  height = MAX_HEIGHT;
+                }
+              }
+
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx?.drawImage(img, 0, 0, width, height);
+              
+              // Force output to JPEG at 80% quality. Fixes massive file sizes and HEIC compat.
+              resolve(canvas.toDataURL('image/jpeg', 0.8));
+            };
+            img.onerror = reject;
+            img.src = event.target?.result as string;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        finalContent = compressedBase64;
+        apiType = 'image';
+      } catch (err) {
+        console.error("Image compression error:", err);
+        alert("Failed to process the image. Please try another photo.");
+        setAiProcessing(false);
+        return;
+      }
     }
 
     if (!finalContent.trim() && aiInputMode !== 'upload' && aiInputMode !== 'camera') return;
@@ -793,15 +876,32 @@ export default function MamaDeeApp() {
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444]">
               <div className="flex justify-between items-center mb-4 border-b border-[#555] pb-2">
                 <h3 className="font-bold text-gray-300 uppercase tracking-wide text-sm md:text-base">Ingredients</h3>
-                <button onClick={() => setFormData(prev => ({ ...prev, ingredients: [...prev.ingredients, { name: '', quantity: 1, unit: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add</button>
+                {formData.ingredients.length === 0 && (
+                  <button onClick={() => setFormData(prev => ({ ...prev, ingredients: [{ name: '', quantity: 1, unit: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add First Ingredient</button>
+                )}
               </div>
               
               <div className="space-y-4">
                 {formData.ingredients.map((ing, idx) => (
-                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] space-y-3 relative pt-8 sm:pt-3">
-                    <button onClick={() => setFormData(prev => ({ ...prev, ingredients: prev.ingredients.filter((_, i) => i !== idx) }))} className="absolute top-1 right-2 text-red-500 font-bold hover:text-red-400 p-2 text-lg">✕</button>
+                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] space-y-3 relative pt-10 sm:pt-3">
                     
-                    <div className="flex flex-col sm:flex-row gap-2 sm:pr-8">
+                    {/* --- NEW INSERT/DELETE ACTIONS --- */}
+                    <div className="absolute top-2 right-2 flex items-center gap-2 z-10">
+                      <button 
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          const newArr = [...formData.ingredients]; 
+                          newArr.splice(idx + 1, 0, { name: '', quantity: 1, unit: '' }); 
+                          setFormData({...formData, ingredients: newArr}); 
+                        }} 
+                        className="text-gray-400 hover:text-white text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded bg-[#333] border border-[#555] transition-colors"
+                      >
+                        + Insert Below
+                      </button>
+                      <button onClick={() => setFormData(prev => ({ ...prev, ingredients: prev.ingredients.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 px-1 text-lg">✕</button>
+                    </div>
+                    
+                    <div className="flex flex-col sm:flex-row gap-2 sm:pr-40">
                       <div className="flex gap-2 w-full sm:w-auto">
                         <input type="number" step="any" list="qty-options" value={ing.quantity} onChange={e => { const newArr = [...formData.ingredients]; newArr[idx].quantity = e.target.value; setFormData({...formData, ingredients: newArr}); }} className="w-1/2 sm:w-20 bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] text-center" placeholder="Qty"/>
                         <input type="text" list="unit-options" value={ing.unit} onChange={e => { const newArr = [...formData.ingredients]; newArr[idx].unit = e.target.value; setFormData({...formData, ingredients: newArr}); }} className="w-1/2 sm:w-24 bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] text-center" placeholder="Unit"/>
@@ -819,17 +919,35 @@ export default function MamaDeeApp() {
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444]">
               <div className="flex justify-between items-center mb-4 border-b border-[#555] pb-2">
                 <h3 className="font-bold text-gray-300 uppercase tracking-wide text-sm md:text-base">Instructions</h3>
-                <button onClick={() => setFormData(prev => ({ ...prev, steps: [...prev.steps, { text: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add Step</button>
+                {formData.steps.length === 0 && (
+                  <button onClick={() => setFormData(prev => ({ ...prev, steps: [{ text: '' }] }))} className="text-[#C53636] font-bold text-xs md:text-sm bg-[#1E1E1E] px-3 py-2 rounded-md border border-[#444]">+ Add First Step</button>
+                )}
               </div>
               
               <div className="space-y-4">
                 {formData.steps.map((step, idx) => (
-                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] relative flex flex-col sm:flex-row gap-3">
-                    <div className="flex justify-between items-center sm:block">
-                        <div className="font-bold text-[#C53636] text-lg sm:pt-2">Step {idx + 1}.</div>
-                        <button onClick={() => setFormData(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 p-2 text-lg sm:absolute sm:top-1 sm:right-2">✕</button>
+                  <div key={idx} className="bg-[#1E1E1E] p-3 rounded-lg border border-[#444] relative flex flex-col sm:flex-row gap-3 pt-10 sm:pt-3">
+                    
+                    {/* --- NEW INSERT/DELETE ACTIONS --- */}
+                    <div className="absolute top-2 right-2 flex items-center gap-2 z-10">
+                      <button 
+                        onClick={(e) => { 
+                          e.preventDefault(); 
+                          const newArr = [...formData.steps]; 
+                          newArr.splice(idx + 1, 0, { text: '' }); 
+                          setFormData({...formData, steps: newArr}); 
+                        }} 
+                        className="text-gray-400 hover:text-white text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded bg-[#333] border border-[#555] transition-colors"
+                      >
+                        + Insert Below
+                      </button>
+                      <button onClick={() => setFormData(prev => ({ ...prev, steps: prev.steps.filter((_, i) => i !== idx) }))} className="text-red-500 font-bold hover:text-red-400 px-1 text-lg">✕</button>
                     </div>
-                    <div className="flex-1 space-y-3 sm:pr-8">
+
+                    <div className="flex justify-between items-center sm:block mt-1 sm:mt-0">
+                        <div className="font-bold text-[#C53636] text-lg sm:pt-1">Step {idx + 1}.</div>
+                    </div>
+                    <div className="flex-1 space-y-3 sm:pr-40">
                       <textarea value={step.text} onChange={e => { const newArr = [...formData.steps]; newArr[idx].text = e.target.value; setFormData({...formData, steps: newArr}); }} className="w-full bg-[#333] rounded p-3 outline-none focus:border-[#C53636] border border-[#555] min-h-[100px]" placeholder="Describe this step..."/>
                       <div className="flex justify-start w-full">
                         {step.audio_url ? (
@@ -1001,18 +1119,117 @@ export default function MamaDeeApp() {
       );
     }
 
+
+
+    // ----------------------------------------------------------------------------
+    // VIEW: CONVERTER
+    // ----------------------------------------------------------------------------
+    if (view === 'converter') {
+      let topDisplay: string | number | null = "";
+      let bottomDisplay: string | number | null = "";
+      
+      // If the box is empty, don't try to calculate a zero
+      if (convInput.val === "") {
+        topDisplay = "";
+        bottomDisplay = "";
+      } else {
+        // Whichever box she typed in gets the raw value, the other calculates the math
+        topDisplay = convInput.source === 'top' ? convInput.val : doConversion(Number(convInput.val), convTo, convFrom);
+        bottomDisplay = convInput.source === 'bottom' ? convInput.val : doConversion(Number(convInput.val), convFrom, convTo);
+      }
+
+      return (
+        <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8 pb-24">
+          <div className="max-w-xl mx-auto">
+            <div className="flex justify-between items-center mb-8 border-b border-[#444] pb-4 sticky top-0 bg-[#1E1E1E] z-10">
+              <button onClick={() => setView('library')} className="text-gray-400 hover:text-white transition-colors font-bold text-sm md:text-base py-2">
+                ← Back
+              </button>
+              <h2 className="text-xl md:text-2xl font-bold truncate px-2 text-white">Kitchen Math</h2>
+              <div className="w-12"></div>
+            </div>
+
+            <div className="bg-[#2D2D2D] rounded-xl p-6 md:p-8 shadow-2xl border border-[#444] flex flex-col gap-8">
+              {/* FROM */}
+              <div className="flex flex-col gap-3">
+                <label className="text-xs font-bold text-[#C53636] uppercase tracking-widest">Convert This</label>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input 
+                    type={topDisplay === null ? "text" : "number"}
+                    step="any"
+                    value={topDisplay === null ? "Incompatible" : topDisplay}
+                    onChange={(e) => setConvInput({ val: e.target.value, source: 'top' })}
+                    className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${topDisplay === null ? 'border-red-900 bg-red-900/10 text-red-500 text-sm' : 'border-[#555] text-white text-3xl'} rounded-lg p-4 font-bold text-center outline-none focus:border-[#C53636] shadow-inner transition-all`}
+                  />
+                  <select 
+                    value={convFrom}
+                    onChange={(e) => setConvFrom(e.target.value)}
+                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-xl font-bold outline-none focus:border-[#C53636] text-center cursor-pointer shadow-inner appearance-none"
+                  >
+                    {CONVERTER_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.toUpperCase()}</option>)}
+                  </select>
+                </div>
+              </div>
+
+              {/* DOUBLE ARROW */}
+              <div className="flex justify-center -my-4 text-[#555]">
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                  <line x1="12" y1="4" x2="12" y2="20"></line>
+                  <polyline points="18 14 12 20 6 14"></polyline>
+                  <polyline points="18 10 12 4 6 10"></polyline>
+                </svg>
+              </div>
+
+              {/* TO */}
+              <div className="flex flex-col gap-3">
+                <label className="text-xs font-bold text-[#00A023] uppercase tracking-widest">Into This</label>
+                <div className="flex flex-col sm:flex-row gap-3">
+                  <input 
+                    type={bottomDisplay === null ? "text" : "number"}
+                    step="any"
+                    value={bottomDisplay === null ? "Incompatible" : bottomDisplay}
+                    onChange={(e) => setConvInput({ val: e.target.value, source: 'bottom' })}
+                    className={`w-full sm:w-1/2 bg-[#1E1E1E] border ${bottomDisplay === null ? 'border-red-900 bg-red-900/10 text-red-500 text-sm' : 'border-[#555] text-white text-3xl'} rounded-lg p-4 font-bold text-center outline-none focus:border-[#00A023] shadow-inner transition-all`}
+                  />
+                  <select 
+                    value={convTo}
+                    onChange={(e) => setConvTo(e.target.value)}
+                    className="w-full sm:w-1/2 bg-[#1E1E1E] border border-[#555] rounded-lg p-4 text-xl font-bold outline-none focus:border-[#00A023] text-center cursor-pointer shadow-inner appearance-none"
+                  >
+                    {CONVERTER_OPTIONS.map(opt => <option key={opt} value={opt}>{opt.toUpperCase()}</option>)}
+                  </select>
+                </div>
+              </div>
+              
+              {(topDisplay === null || bottomDisplay === null) && (
+                <p className="text-[#C53636] text-sm font-bold text-center bg-[#C53636]/10 py-2 rounded border border-[#C53636]/30">You cannot convert between weight, volume, or temperature.</p>
+              )}
+            </div>
+          </div>
+        </div>
+      );
+    }
+    
     // ----------------------------------------------------------------------------
     // VIEW: LIBRARY
     // ----------------------------------------------------------------------------
     return (
       <div className="min-h-screen bg-[#1E1E1E] text-white font-sans p-4 md:p-8">
-        <div className="flex justify-between items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6">
-          <div className="flex items-center gap-3 md:gap-4">
-            <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-10 h-10 md:w-12 md:h-12 object-contain drop-shadow-md" />
-            <h1 className="text-xl md:text-4xl font-bold text-[#C53636] leading-tight">Mama Dee's Recipes</h1>
+        
+        {/* --- HEADER WRAPPER (Mobile Optimized) --- */}
+        <div className="flex flex-row justify-between items-center mb-6 md:mb-8 border-b border-[#333] pb-4 md:pb-6 gap-2">
+          
+          {/* LOGO AND TITLE */}
+          <div className="flex items-center gap-2 md:gap-4 overflow-hidden">
+            <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-8 h-8 md:w-12 md:h-12 object-contain drop-shadow-md shrink-0" />
+            <h1 className="text-lg sm:text-xl md:text-4xl font-bold text-[#C53636] leading-tight truncate">
+              Mama Dee's Recipes
+            </h1>
           </div>
-          <div className="flex gap-2 items-center">
-            <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-2 flex items-center justify-center shrink-0">
+
+          {/* BUTTONS */}
+          <div className="flex gap-1.5 md:gap-3 items-center shrink-0">
+            <button onClick={handleShare} title="Share App" className="text-gray-400 hover:text-white transition-colors p-1 md:p-2 flex items-center justify-center shrink-0">
               <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                 <circle cx="18" cy="5" r="3"></circle>
                 <circle cx="6" cy="12" r="3"></circle>
@@ -1021,17 +1238,28 @@ export default function MamaDeeApp() {
                 <line x1="15.41" y1="6.51" x2="8.59" y2="10.49"></line>
               </svg>
             </button>
-            <button onClick={() => requireAuth('settings')} className="w-24 md:w-32 bg-[#444] hover:bg-[#555] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] text-center shrink-0">
-              ⚙️ Settings
+            <button onClick={() => setView('converter')} title="Kitchen Math" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
+              🔄<span className="hidden md:inline md:ml-2">Math</span>
             </button>
-            <button onClick={handleAddRecipe} className="w-24 md:w-32 bg-[#C53636] hover:bg-[#C95757] py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base text-center shrink-0">
-              + Add
+            <button onClick={() => requireAuth('settings')} title="Settings" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
+              ⚙️<span className="hidden md:inline md:ml-2">Settings</span>
+            </button>
+            <button onClick={handleAddRecipe} title="Add Recipe" className="bg-[#C53636] hover:bg-[#C95757] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base flex items-center justify-center shrink-0">
+              <span className="md:hidden text-lg leading-none">+</span>
+              <span className="hidden md:inline">+ Add</span>
             </button>
           </div>
         </div>
+        {/* --- END HEADER WRAPPER --- */}
 
         <div className="mb-6 flex flex-col md:flex-row gap-3 md:gap-4">
-          <input type="text" className="flex-1 bg-[#333] border border-[#444] rounded-md p-3 md:p-4 text-white outline-none focus:border-[#C53636] transition-colors shadow-inner" placeholder="🔍 Search recipes by title..." value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} />
+          <input 
+            type="text" 
+            className="flex-1 bg-[#333] border border-[#444] rounded-md p-3 md:p-4 text-white outline-none focus:border-[#C53636] transition-colors shadow-inner" 
+            placeholder={`🔍 Search ${recipes.length} recipes...`} 
+            value={searchQuery} 
+            onChange={(e) => setSearchQuery(e.target.value)} 
+          />
           
           <select
             value={selectedCategoryFilter}

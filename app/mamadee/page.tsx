@@ -223,6 +223,7 @@ export default function MamaDeeApp() {
   const [activeStep, setActiveStep] = useState(-1);
   const recognitionRef = useRef<any>(null);
   const wakeLockRef = useRef<any>(null);
+  const libraryScrollYRef = useRef<number | null>(null);
   
   // Refs to prevent stale closures in the voice event listener
   const isListeningRef = useRef(false);
@@ -362,6 +363,18 @@ export default function MamaDeeApp() {
     setAppPassword(localStorage.getItem('mamadee_password') || "");
     fetchRecipes();
   }, []);
+
+  useEffect(() => {
+    if (view !== 'library' || libraryScrollYRef.current === null) return;
+
+    const savedY = libraryScrollYRef.current;
+
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.scrollTo({ top: savedY, behavior: 'auto' });
+      });
+    });
+  }, [view, recipes.length, searchQuery, selectedCategoryFilter]);
 
   const fetchRecipes = async () => {
     setLoading(true);
@@ -688,13 +701,56 @@ export default function MamaDeeApp() {
       if (!file) return alert("Please select or take a photo first.");
       
       setAiProcessing(true);
-      const reader = new FileReader();
-      const base64Promise = new Promise((resolve) => {
-        reader.onload = () => resolve(reader.result);
-        reader.readAsDataURL(file);
-      });
-      finalContent = (await base64Promise) as string;
-      apiType = 'image'; // Map both to 'image' for the backend
+
+      try {
+        // Intercept and compress the image using HTML5 Canvas
+        const compressedBase64 = await new Promise<string>((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+              const canvas = document.createElement('canvas');
+              const MAX_WIDTH = 1200; // Cap resolution for OCR
+              const MAX_HEIGHT = 1200;
+              let width = img.width;
+              let height = img.height;
+
+              // Maintain aspect ratio
+              if (width > height) {
+                if (width > MAX_WIDTH) {
+                  height *= MAX_WIDTH / width;
+                  width = MAX_WIDTH;
+                }
+              } else {
+                if (height > MAX_HEIGHT) {
+                  width *= MAX_HEIGHT / height;
+                  height = MAX_HEIGHT;
+                }
+              }
+
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx?.drawImage(img, 0, 0, width, height);
+              
+              // Force output to JPEG at 80% quality. Fixes massive file sizes and HEIC compat.
+              resolve(canvas.toDataURL('image/jpeg', 0.8));
+            };
+            img.onerror = reject;
+            img.src = event.target?.result as string;
+          };
+          reader.onerror = reject;
+          reader.readAsDataURL(file);
+        });
+
+        finalContent = compressedBase64;
+        apiType = 'image';
+      } catch (err) {
+        console.error("Image compression error:", err);
+        alert("Failed to process the image. Please try another photo.");
+        setAiProcessing(false);
+        return;
+      }
     }
 
     if (!finalContent.trim() && aiInputMode !== 'upload' && aiInputMode !== 'camera') return;
@@ -1235,7 +1291,7 @@ export default function MamaDeeApp() {
             {filteredRecipes.length > 0 ? (
               filteredRecipes.map((recipe) => (
                 // --- UPDATE THIS CLICK EVENT ---
-                <div key={recipe.id} onClick={() => { setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                <div key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
                   
                   {/* --- 3-DOT MENU BUTTON --- */}
                   <button
