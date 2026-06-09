@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { supabase } from "../../utils/supabase"; 
 import { useRouter } from "next/navigation";
 
-const SHOW_INCOMPLETE_SCAN_BUTTON = 1; // 1 = show scan button, 0 = hide scan button
+const SHOW_INCOMPLETE_SCAN_BUTTON = 0; // 1 = show scan button, 0 = hide scan button
 const AUTO_SCAN_INCOMPLETE_ON_LOAD = 1; // 1 = scan automatically when page opens, 0 = do not auto-scan
 // ============================================================================
 // INTERFACES & CONSTANTS
@@ -44,6 +44,14 @@ const UNIT_OPTIONS = ['g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pin
 
 
 const INCOMPLETE_CATEGORY = "Incomplete";
+const UNCATEGORIZED_CATEGORY = "Uncategorized";
+const NEEDS_PHOTO_CATEGORY = "Needs Photo";
+
+const SYSTEM_CATEGORIES = [
+  INCOMPLETE_CATEGORY,
+  UNCATEGORIZED_CATEGORY,
+  NEEDS_PHOTO_CATEGORY
+];
 
 const recipeHasIngredients = (recipe: Pick<Recipe, 'ingredients'>) => {
   return (recipe.ingredients || []).some(ing => ing.name?.trim() !== '');
@@ -53,18 +61,38 @@ const recipeHasInstructions = (recipe: Pick<Recipe, 'steps'>) => {
   return (recipe.steps || []).some(step => step.text?.trim() !== '' || !!step.audio_url);
 };
 
-const getCategoriesWithIncompleteStatus = (recipe: Pick<Recipe, 'categories' | 'ingredients' | 'steps'>) => {
+const recipeHasMainPhoto = (recipe: Pick<Recipe, 'media_urls'>) => {
+  return !!recipe.media_urls?.main_image;
+};
+
+const recipeHasRealCategory = (recipe: Pick<Recipe, 'categories'>) => {
+  return (recipe.categories || []).some(cat => !SYSTEM_CATEGORIES.includes(cat));
+};
+
+const getCategoriesWithIncompleteStatus = (recipe: Pick<Recipe, 'categories' | 'ingredients' | 'steps' | 'media_urls'>) => {
   const currentCategories = recipe.categories || [];
-  const cleanCategories = currentCategories.filter(cat => cat !== INCOMPLETE_CATEGORY);
+  const cleanCategories = currentCategories.filter(cat => !SYSTEM_CATEGORIES.includes(cat));
 
   const hasIngredients = recipeHasIngredients(recipe);
   const hasInstructions = recipeHasInstructions(recipe);
+  const hasPhoto = recipeHasMainPhoto(recipe);
+  const hasRealCategory = cleanCategories.length > 0;
 
-  if (hasIngredients && hasInstructions) {
-    return cleanCategories;
+  const updatedCategories = [...cleanCategories];
+
+  if (!hasPhoto) {
+    updatedCategories.push(NEEDS_PHOTO_CATEGORY);
   }
 
-  return [...cleanCategories, INCOMPLETE_CATEGORY];
+  if (!hasRealCategory) {
+    updatedCategories.push(UNCATEGORIZED_CATEGORY);
+  }
+
+  if (!hasIngredients || !hasInstructions || !hasPhoto || !hasRealCategory) {
+    updatedCategories.push(INCOMPLETE_CATEGORY);
+  }
+
+  return updatedCategories;
 };
 
 // ============================================================================
@@ -765,7 +793,8 @@ export default function MamaDeeApp() {
       categories: getCategoriesWithIncompleteStatus({
         ...formData,
         ingredients: cleanedIngredients,
-        steps: cleanedSteps
+        steps: cleanedSteps,
+        media_urls: formData.media_urls || {}
       })
     };
 
