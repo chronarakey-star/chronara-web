@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { supabase } from "../../utils/supabase"; 
 import { useRouter } from "next/navigation";
 
-const SHOW_INCOMPLETE_SCAN_BUTTON = 1; // 1 = show scan button, 0 = hide scan button
+const SHOW_INCOMPLETE_SCAN_BUTTON = 0; // 1 = show scan button, 0 = hide scan button
 const AUTO_SCAN_INCOMPLETE_ON_LOAD = 1; // 1 = scan automatically when page opens, 0 = do not auto-scan
 // ============================================================================
 // INTERFACES & CONSTANTS
