@@ -296,6 +296,7 @@ export default function POSDashboard() {
               storeId={storeId} 
               themeColor={themeColor} 
               user={currentUser} 
+              setActiveModule={setActiveModule}
             />
           )}
 

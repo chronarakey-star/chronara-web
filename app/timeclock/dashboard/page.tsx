@@ -88,6 +88,10 @@ export default function TimeClockDashboard() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [employeeData, setEmployeeData] = useState<Employee[]>([]); 
+  const [storeAccessAllowed, setStoreAccessAllowed] = useState(true);
+  const [storeAccessMessage] = useState(
+    "This user does not belong to this store. To grant them access to this store, please create a separate user and link that user to a new employee for the store."
+  );
   const [storeId, setStoreId] = useState<string>("");
   const [storeTimezone, setStoreTimezone] = useState<string>("America/Toronto");
   const [companyId, setCompanyId] = useState<string>(""); 
@@ -112,6 +116,7 @@ export default function TimeClockDashboard() {
 
   // --- AUTO LOGOUT STATES ---
   const timeoutRef = useRef<NodeJS.Timeout | null>(null);
+  const lastHeavyRefreshRef = useRef(0);
   const [autoLogoutEnabled, setAutoLogoutEnabled] = useState(false);
 
   const [stats, setStats] = useState({
@@ -398,12 +403,35 @@ export default function TimeClockDashboard() {
     }
   };
 
-  const refreshStatus = async (empIds: string[], currentCompanyId: string, currentStoreId: string, tz: string) => {
+  const refreshStatus = async (
+    empIds: string[],
+    currentCompanyId: string,
+    currentStoreId: string,
+    tz: string,
+    options: { forceHeavy?: boolean } = {}
+  ) => {
     try {
       let punchQ = supabase.from('time_punches').select('*').in('employee_id', empIds);
       if (currentStoreId && currentStoreId !== "ALL_STORES") punchQ = punchQ.eq('store_id', currentStoreId);
       
-      const { data: punches } = await punchQ.order('clock_in', { ascending: false }).limit(1);
+      let { data: punches } = await punchQ.order('clock_in', { ascending: false }).limit(1);
+
+      const selectedStoreHasOpenPunch =
+        punches && punches.length > 0 && !punches[0].clock_out;
+
+      if (!selectedStoreHasOpenPunch && currentStoreId && currentStoreId !== "ALL_STORES") {
+        const { data: openPunches } = await supabase
+          .from('time_punches')
+          .select('*')
+          .in('employee_id', empIds)
+          .is('clock_out', null)
+          .order('clock_in', { ascending: false })
+          .limit(1);
+
+        if (openPunches && openPunches.length > 0) {
+          punches = openPunches;
+        }
+      }
 
       if (punches && punches.length > 0) {
         const punch = punches[0];
@@ -520,8 +548,15 @@ export default function TimeClockDashboard() {
         setStatus("CLOCKED_OUT");
       }
 
-      await loadPerformanceStats(empIds, currentCompanyId, currentStoreId, tz);
-      await fetchTimeOffs(empIds, tz);
+      const nowMs = Date.now();
+      const shouldRunHeavyRefresh =
+        options.forceHeavy || nowMs - lastHeavyRefreshRef.current >= 60000;
+
+      if (shouldRunHeavyRefresh) {
+        lastHeavyRefreshRef.current = nowMs;
+        await loadPerformanceStats(empIds, currentCompanyId, currentStoreId, tz);
+        await fetchTimeOffs(empIds, tz);
+      }
     } catch (err) {
       console.error("Error refreshing status:", err);
     }
@@ -576,11 +611,32 @@ export default function TimeClockDashboard() {
 
         if (empData && empData.length > 0) {
           setEmployeeData(empData);
-          const targetEmp = empData.find(e => e.store_id === cachedStore) || empData[0];
-          setEmployee(targetEmp);
-          
-          const empIds = empData.map(e => e.id);
-          await refreshStatus(empIds, activeCompanyId, cachedStore, fetchedTz);
+
+          if (cachedStore && cachedStore !== "ALL_STORES") {
+            const targetEmp = empData.find(e => e.store_id === cachedStore);
+
+            if (targetEmp) {
+              setEmployee(targetEmp);
+              setStoreAccessAllowed(true);
+
+              await refreshStatus([targetEmp.id], activeCompanyId, cachedStore, fetchedTz, { forceHeavy: true });
+            } else {
+              setEmployee(null);
+              setStoreAccessAllowed(false);
+              setStatus("CLOCKED_OUT");
+              setActivePunchId(null);
+              setActivePunchTime(null);
+              setActiveBreakId(null);
+              setActiveBreakTime(null);
+            }
+          } else {
+            const targetEmp = empData[0];
+            setEmployee(targetEmp);
+            setStoreAccessAllowed(true);
+
+            const empIds = empData.map(e => e.id);
+            await refreshStatus(empIds, activeCompanyId, cachedStore, fetchedTz, { forceHeavy: true });
+          }
         }
 
         if (cachedStore) {
@@ -620,13 +676,19 @@ export default function TimeClockDashboard() {
   }, [status, activeBreakTime, activePunchTime]);
 
   useEffect(() => {
-    if (!employeeData || employeeData.length === 0) return;
+    if (!employee && (!employeeData || employeeData.length === 0)) return;
+
     const syncTimer = setInterval(() => {
-      const empIds = employeeData.map(e => e.id);
+      const empIds =
+        employee && storeId && storeId !== "ALL_STORES"
+          ? [employee.id]
+          : employeeData.map(e => e.id);
+
       refreshStatus(empIds, companyId, storeId, storeTimezone);
     }, 10000);
+
     return () => clearInterval(syncTimer);
-  }, [employeeData, companyId, storeId, storeTimezone]);
+  }, [employee, employeeData, companyId, storeId, storeTimezone]);
 
   // ============================================================================
   // AUTO-LOGOUT INACTIVITY TRACKER
@@ -657,7 +719,30 @@ export default function TimeClockDashboard() {
   // ============================================================================
   // 4. ACTION HANDLERS (Database Writes)
   // ============================================================================
+
+  const requireStoreAccessForPunching = () => {
+    if (!storeId || storeId === "ALL_STORES") {
+      setFeedbackModal({
+        type: "error",
+        title: "Store Required",
+        message: "Please select a specific store before clocking in or clocking out."
+      });
+      return false;
+    }
+
+    if (!storeAccessAllowed || !employee) {
+      setFeedbackModal({
+        type: "error",
+        title: "Access Denied",
+        message: storeAccessMessage
+      });
+      return false;
+    }
+
+    return true;
+  };
   const handleClockIn = async () => {
+    if (!requireStoreAccessForPunching()) return;
     if (!employee) return;
     if (!companyId) {
       setFeedbackModal({ type: "error", title: "System Error", message: "Company ID is missing. Please refresh the page." });
@@ -818,7 +903,7 @@ export default function TimeClockDashboard() {
       if (err.code === '23505' || errorString.includes('duplicate') || errorString.includes('one_active_shift')) {
         setFeedbackModal({ type: "info", title: "Already Clocked In", message: "You are already clocked in! Your status has been refreshed." });
         const empIds = employeeData.map(e => e.id);
-        await refreshStatus(empIds, companyId, storeId, storeTimezone);
+        await refreshStatus(empIds, companyId, storeId, storeTimezone, { forceHeavy: true });
       } else {
         setFeedbackModal({ type: "error", title: "Error", message: "Error clocking in. Please try again." });
       }
@@ -826,6 +911,7 @@ export default function TimeClockDashboard() {
   };
 
   const handleClockOut = async () => {
+    if (!requireStoreAccessForPunching()) return;
     if (!activePunchId || !employee) return;
     let nowIso = new Date().toISOString(); 
 
@@ -925,6 +1011,11 @@ export default function TimeClockDashboard() {
   };
 
   const executeStartBreak = async (breakType: "Paid" | "Unpaid") => {
+    if (!requireStoreAccessForPunching()) {
+      setShowBreakModal(false);
+      return;
+    }
+
     if (!activePunchId || !employee || !companyId) return;
     setShowBreakModal(false);
 
@@ -969,6 +1060,7 @@ export default function TimeClockDashboard() {
   };
 
   const handleEndBreak = async () => {
+    if (!requireStoreAccessForPunching()) return;
     if (!activeBreakId || !employee) return;
     const nowIso = new Date().toISOString();
 
@@ -989,6 +1081,7 @@ export default function TimeClockDashboard() {
   };
 
   const handleTimeOffSubmit = async () => {
+    if (!requireStoreAccessForPunching()) return;
     if (!employee || !companyId) return;
 
     if (!toStart || !toEnd) {
@@ -1027,11 +1120,25 @@ export default function TimeClockDashboard() {
 
   const handleDeleteTimeOff = async (reqId: string) => {
     try {
-      await supabase.from('time_off_requests').delete().eq('id', reqId);
+      const { error } = await supabase
+        .from('time_off_requests')
+        .update({
+          status: 'Cancelled',
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', reqId);
+
+      if (error) throw error;
+
       const empIds = employeeData.map(e => e.id);
       if (empIds.length > 0) await fetchTimeOffs(empIds, storeTimezone);
     } catch (err) {
-      console.error("Error deleting time off request:", err);
+      console.error("Error cancelling time off request:", err);
+      setFeedbackModal({
+        type: "error",
+        title: "Error",
+        message: "Failed to cancel time off request."
+      });
     }
   };
 
@@ -1304,19 +1411,32 @@ export default function TimeClockDashboard() {
           <div className="flex flex-col gap-6">
             <div className="bg-[#2b2b2b] rounded-xl p-8 flex flex-col items-center justify-center shadow-sm">
               <div className="text-center mb-6">
-                {status === "CLOCKED_OUT" && <p className="text-[#C92C2C] font-bold text-lg tracking-wider mb-1">🔴 CLOCKED OUT</p>}
-                {status === "CLOCKED_IN" && <p className="text-[#00A023] font-bold text-lg tracking-wider mb-1">🟢 CLOCKED IN</p>}
-                {status === "ON_BREAK" && <p className="text-[#DB8700] font-bold text-lg tracking-wider mb-1">🟠 ON BREAK</p>}
-                <p className="text-gray-400">{duration}</p>
+                {!storeAccessAllowed ? (
+                  <>
+                    <p className="text-[#C92C2C] font-bold text-lg tracking-wider mb-1">🔒 STORE ACCESS DENIED</p>
+                    <p className="text-gray-400">This user does not belong to this store.</p>
+                  </>
+                ) : (
+                  <>
+                    {status === "CLOCKED_OUT" && <p className="text-[#C92C2C] font-bold text-lg tracking-wider mb-1">🔴 CLOCKED OUT</p>}
+                    {status === "CLOCKED_IN" && <p className="text-[#00A023] font-bold text-lg tracking-wider mb-1">🟢 CLOCKED IN</p>}
+                    {status === "ON_BREAK" && <p className="text-[#DB8700] font-bold text-lg tracking-wider mb-1">🟠 ON BREAK</p>}
+                    <p className="text-gray-400">{duration}</p>
+                  </>
+                )}
               </div>
 
               <div className="w-full max-w-[400px] space-y-4">
-                {status === "CLOCKED_OUT" && (
+                {!storeAccessAllowed ? (
+                  <button onClick={requireStoreAccessForPunching} className="w-full bg-[#C92C2C] hover:bg-[#8a1c1c] text-white py-4 rounded text-xl font-bold transition-colors shadow-lg active:scale-[0.98]">
+                    Store Access Denied
+                  </button>
+                ) : status === "CLOCKED_OUT" && (
                   <button onClick={handleClockIn} className="w-full bg-[#00A023] hover:bg-[#00801c] text-white py-4 rounded text-xl font-bold transition-colors shadow-lg active:scale-[0.98]">
                     Clock In
                   </button>
                 )}
-                {status === "CLOCKED_IN" && (
+                {storeAccessAllowed && status === "CLOCKED_IN" && (
                   <>
                     <button onClick={handleClockOut} className="w-full bg-[#C92C2C] hover:bg-[#8a1c1c] text-white py-4 rounded text-xl font-bold transition-colors shadow-lg active:scale-[0.98]">
                       Clock Out
@@ -1326,7 +1446,7 @@ export default function TimeClockDashboard() {
                     </button>
                   </>
                 )}
-                {status === "ON_BREAK" && (
+                {storeAccessAllowed && status === "ON_BREAK" && (
                   <button onClick={handleEndBreak} className="w-full bg-[#00A023] hover:bg-[#00801c] text-white py-4 rounded text-xl font-bold transition-colors shadow-lg active:scale-[0.98]">
                     End Break
                   </button>
@@ -1338,9 +1458,13 @@ export default function TimeClockDashboard() {
               <div className="flex justify-between items-center mb-4">
                 <h3 className="text-sm font-bold text-gray-400 tracking-widest">TIME OFF</h3>
                 <button 
-                  onClick={() => setShowTimeOffModal(true)}
-                  className="text-white px-4 py-1.5 rounded text-sm font-bold transition-colors shadow" 
-                  style={{ backgroundColor: themeColor }}
+                  onClick={() => {
+                    if (!requireStoreAccessForPunching()) return;
+                    setShowTimeOffModal(true);
+                  }}
+                  className="text-white px-4 py-1.5 rounded text-sm font-bold transition-colors shadow disabled:opacity-50 disabled:cursor-not-allowed" 
+                  style={{ backgroundColor: storeAccessAllowed ? themeColor : "#555555" }}
+                  disabled={!storeAccessAllowed}
                 >
                   + Request
                 </button>

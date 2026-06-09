@@ -150,13 +150,30 @@ export default function TimeClockLogin() {
   
   const checkPunchStatus = async (empId: string) => {
     try {
-      const { data: punches } = await supabase
+      let { data: punches } = await supabase
         .from('time_punches')
         .select('id, clock_in, clock_out, store_id')
         .eq('employee_id', empId)
         .eq('store_id', selectedStore)
         .order('clock_in', { ascending: false })
         .limit(1);
+
+      const selectedStoreHasOpenPunch =
+        punches && punches.length > 0 && !punches[0].clock_out;
+
+      if (!selectedStoreHasOpenPunch) {
+        const { data: openPunches } = await supabase
+          .from('time_punches')
+          .select('id, clock_in, clock_out, store_id')
+          .eq('employee_id', empId)
+          .is('clock_out', null)
+          .order('clock_in', { ascending: false })
+          .limit(1);
+
+        if (openPunches && openPunches.length > 0) {
+          punches = openPunches;
+        }
+      }
 
       if (punches && punches.length > 0 && !punches[0].clock_out) {
         const punch = punches[0];

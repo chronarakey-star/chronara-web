@@ -14,8 +14,10 @@ interface Employee {
 }
 
 // --- TIMEZONE HELPERS ---
-const getStoreTimezone = (province: string, isAllStores: boolean) => {
-    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone; // Fallback to browser time
+const getStoreTimezone = (province: string, isAllStores: boolean, timezoneId?: string | null) => {
+    if (timezoneId && timezoneId.trim() !== "") return timezoneId.trim();
+    if (isAllStores) return Intl.DateTimeFormat().resolvedOptions().timeZone;
+
     const map: Record<string, string> = {
         'BC': 'America/Vancouver',
         'AB': 'America/Edmonton', 'NT': 'America/Edmonton',
@@ -26,6 +28,7 @@ const getStoreTimezone = (province: string, isAllStores: boolean) => {
         'NL': 'America/St_Johns',
         'YT': 'America/Whitehorse'
     };
+
     return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
 };
 
@@ -188,9 +191,14 @@ export default function TimeClockSchedule() {
         // --- FETCH STORE TIMEZONE ---
         let fetchedTz = "America/Toronto";
         if (currentStoreId && currentStoreId !== "ALL_STORES") {
-            const { data: storeInfo } = await supabase.from('stores').select('province').eq('id', currentStoreId).single();
-            if (storeInfo && storeInfo.province) {
-                fetchedTz = getStoreTimezone(storeInfo.province, false);
+            const { data: storeInfo } = await supabase
+              .from('stores')
+              .select('province, timezone_id')
+              .eq('id', currentStoreId)
+              .single();
+
+            if (storeInfo) {
+                fetchedTz = getStoreTimezone(storeInfo.province || "", false, storeInfo.timezone_id);
                 setStoreTimezone(fetchedTz);
             }
         } else if (currentStoreId === "ALL_STORES") {

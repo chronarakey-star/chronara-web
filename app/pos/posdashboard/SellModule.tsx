@@ -49,6 +49,62 @@ const getStoreTimezone = (province: string, isAllStores: boolean) => {
     return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
 };
 
+const normalizeProvince = (province?: string) => {
+    return (province || "ON").trim().toUpperCase();
+};
+
+const getDefaultTaxCodes = (province?: string) => {
+    const prov = normalizeProvince(province);
+
+    if (["ON", "NB", "NL", "NS", "PE"].includes(prov)) {
+        return { fed: "HST", prov: "Exempt" };
+    }
+
+    if (prov === "BC") {
+        return { fed: "GST", prov: "PST" };
+    }
+
+    if (prov === "SK") {
+        return { fed: "GST", prov: "PST" };
+    }
+
+    if (prov === "MB") {
+        return { fed: "GST", prov: "RST" };
+    }
+
+    return { fed: "GST", prov: "Exempt" };
+};
+
+const getFallbackTaxRates = (province?: string): Record<string, number> => {
+    const prov = normalizeProvince(province);
+
+    const wholeRates: Record<string, { gst: number; hst: number; pst: number; rst: number }> = {
+        ON: { gst: 5, hst: 13, pst: 0, rst: 0 },
+        NB: { gst: 5, hst: 15, pst: 0, rst: 0 },
+        NL: { gst: 5, hst: 15, pst: 0, rst: 0 },
+        NS: { gst: 5, hst: 15, pst: 0, rst: 0 },
+        PE: { gst: 5, hst: 15, pst: 0, rst: 0 },
+        BC: { gst: 5, hst: 0, pst: 7, rst: 0 },
+        SK: { gst: 5, hst: 0, pst: 6, rst: 0 },
+        MB: { gst: 5, hst: 0, pst: 0, rst: 7 },
+        AB: { gst: 5, hst: 0, pst: 0, rst: 0 },
+        NT: { gst: 5, hst: 0, pst: 0, rst: 0 },
+        NU: { gst: 5, hst: 0, pst: 0, rst: 0 },
+        YT: { gst: 5, hst: 0, pst: 0, rst: 0 },
+    };
+
+    const fallback = wholeRates[prov] || wholeRates.ON;
+
+    return {
+        gst: fallback.gst / 100,
+        hst: fallback.hst / 100,
+        pst: fallback.pst / 100,
+        rst: fallback.rst / 100,
+        exempt: 0.0,
+        custom: 0.0
+    };
+};
+
 const getItemSurcharge = (item: CartItem) => {
     if (!item.ingredients) return 0;
     return item.ingredients.reduce((sum, ing) => {
@@ -332,7 +388,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
 
   // Tax State
   const [storeProvince, setStoreProvince] = useState<string>("ON"); // <--- NEW
-  const [taxRates, setTaxRates] = useState<Record<string, number>>({ hst: 0.13, gst: 0.05, pst: 0, rst: 0, qst: 0, exempt: 0, custom: 0 });
+  const [taxRates, setTaxRates] = useState<Record<string, number>>(getFallbackTaxRates("ON"));
   const [isNativeExempt, setIsNativeExempt] = useState(false);
   const [statusCardNumber, setStatusCardNumber] = useState("");
   const [manualTax, setManualTax] = useState<number | null>(null);
@@ -463,7 +519,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   }, []);
 
   // ==========================================
-  // --- NEW: THE 3-SECOND CLOUD HEARTBEAT ---
+  // --- CLOUD HEARTBEAT ---
   // ==========================================
   useEffect(() => {
     if (!companyId) return;
@@ -515,7 +571,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }
     };
 
-    const intervalId = setInterval(pingCloudStatus, 3000);
+    const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
   }, [companyId, storeId]);
   // ==========================================
@@ -598,6 +654,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       const newRefundShrinkages = new Set<string>(); // <--- NEW
       const newIngredientShrinkages = new Set<string>(); // <--- NEW
       
+      const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
+
       refundData.items.forEach((item: any) => {
         const pid = item.product_id || item.sku;
         const refundedSoFar = refundedIds[pid] || 0;
@@ -673,9 +731,9 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
               qty: remainingQty,
               disc_type: item.disc_type as any,
               disc_val: item.disc_val || 0,
-              tax_code: matchedProd?.tax_code || "HST",
-              prov_tax_code: matchedProd?.prov_tax_code || "Exempt",
-              item_commission: matchedProd ? parseFloat(matchedProd.item_commission || 0) : 0, 
+              tax_code: matchedProd?.tax_code || defaultTaxCodes.fed,
+              prov_tax_code: matchedProd?.prov_tax_code || defaultTaxCodes.prov,
+              item_commission: matchedProd ? parseFloat(matchedProd.item_commission || 0) : 0,
               ingredients: ingredients,
               is_tip: isTip,
               is_gift_card: isGiftCard,
@@ -722,7 +780,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }
     };
     loadRefundSession();
-  }, [refundData, autoDamagedRefunds]);
+  }, [refundData, autoDamagedRefunds, storeProvince]);
 
   // Click outside listener for Customer Dropdown
   useEffect(() => {
@@ -755,7 +813,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
             const { data: sData } = await supabase.from('stores').select('province').eq('id', storeId).maybeSingle();
             if (sData && sData.province) sProv = sData.province;
         }
-        const finalProv = sProv.toUpperCase();
+        const finalProv = normalizeProvince(sProv);
         setStoreProvince(finalProv);
         
         // --- THE DYNAMIC TAX FETCH ---
@@ -770,13 +828,14 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
 
         // ... (inside fetchCompanySettings)
         
-        // Dynamically convert whole numbers (e.g. 13) to decimals (0.13)
+        const fallbackRates = getFallbackTaxRates(finalProv);
+
+        // Dynamically convert whole numbers from tax_settings, with safe province fallback rates.
         setTaxRates({
-            gst: (parseFloat(provTaxData.gst) || 0) / 100.0,
-            hst: (parseFloat(provTaxData.hst) || 0) / 100.0,
-            pst: (parseFloat(provTaxData.pst) || 0) / 100.0,
-            rst: (parseFloat(provTaxData.rst) || 0) / 100.0,
-            qst: (parseFloat(provTaxData.qst) || 0) / 100.0,
+            gst: Number.isFinite(parseFloat(provTaxData.gst)) ? parseFloat(provTaxData.gst) / 100.0 : fallbackRates.gst,
+            hst: Number.isFinite(parseFloat(provTaxData.hst)) ? parseFloat(provTaxData.hst) / 100.0 : fallbackRates.hst,
+            pst: Number.isFinite(parseFloat(provTaxData.pst)) ? parseFloat(provTaxData.pst) / 100.0 : fallbackRates.pst,
+            rst: Number.isFinite(parseFloat(provTaxData.rst)) ? parseFloat(provTaxData.rst) / 100.0 : fallbackRates.rst,
             exempt: 0.0,
             custom: 0.0
         });
@@ -1028,6 +1087,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     }
     // -----------------------------------------------------------------------------------
 
+    const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
+
     cart.forEach(item => {
       const surcharge = getItemSurcharge(item);
       let lineRaw = (item.price + surcharge) * item.qty;
@@ -1042,15 +1103,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       if (!item.is_tip && !item.is_gift_card && !item.sku?.includes('SYS_')) {
         discountableSubtotal += lineVal;
 
-        let fedCode = (item.tax_code || "HST").toUpperCase();
-        let provCode = (item.prov_tax_code || "Exempt").toUpperCase();
-
-        // Smart Province Tax Mapping
-        if (fedCode === "HST" && ["AB", "BC", "MB", "QC", "SK", "NT", "NU", "YT"].includes(storeProvince)) {
-            fedCode = "GST";
-        } else if (fedCode === "GST" && ["ON", "NB", "NL", "NS", "PE"].includes(storeProvince)) {
-            fedCode = "HST";
-        }
+        let fedCode = (item.tax_code || defaultTaxCodes.fed).toUpperCase();
+        let provCode = (item.prov_tax_code || defaultTaxCodes.prov).toUpperCase();
 
         const fedRate = fedCode === "CUSTOM" ? 0 : (taxRates[fedCode.toLowerCase()] || 0);
         const provRate = provCode === "CUSTOM" ? 0 : (taxRates[provCode.toLowerCase()] || 0);
@@ -1222,7 +1276,9 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         console.warn("⚠️ Product has no SKU, cannot fetch ingredients!");
     }
 
-    setCart(prev => {
+        const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
+
+    setCart(prev => {
       const existingNow = prev.find(i => i.id === product.id);
       if (existingNow) {
           if (ingredients.length > 0) {
@@ -1237,8 +1293,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                 qty: 1,
                 disc_type: null,
                 disc_val: 0,
-                tax_code: product.tax_code || 'HST',
-                prov_tax_code: product.prov_tax_code || 'Exempt',
+                tax_code: product.tax_code || defaultTaxCodes.fed,
+                prov_tax_code: product.prov_tax_code || defaultTaxCodes.prov,
                 item_commission: parseFloat(product.item_commission || 0), 
                 ingredients: ingredients
               }];
@@ -1257,8 +1313,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         qty: 1,
         disc_type: null,
         disc_val: 0,
-        tax_code: product.tax_code || 'HST',
-        prov_tax_code: product.prov_tax_code || 'Exempt',
+        tax_code: product.tax_code || defaultTaxCodes.fed,
+        prov_tax_code: product.prov_tax_code || defaultTaxCodes.prov,
         item_commission: parseFloat(product.item_commission || 0), 
         ingredients: ingredients
       }];
@@ -1863,52 +1919,137 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       let db_tax_val = 0.0;
       let db_prov_tax_val = 0.0;
       const tax_breakdown: Record<string, number> = {};
+      const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
       
       if (!isNativeExempt) {
           let tempSub = 0.0;
+          let discountableTempSub = 0.0;
+
           itemsToSave.forEach(item => {
               const surcharge = getItemSurcharge(item);
               let lineVal = (item.price + surcharge) * item.qty;
-              if (item.disc_type === "%") lineVal -= lineVal * (parseFloat(item.disc_val || 0) / 100);
-              else if (item.disc_type === "$") {
+
+              if (item.disc_type === "%") {
+                  lineVal -= lineVal * (parseFloat(item.disc_val || 0) / 100);
+              } else if (item.disc_type === "$") {
                   if (lineVal < 0) lineVal += Math.abs(parseFloat(item.disc_val || 0));
                   else lineVal -= Math.abs(parseFloat(item.disc_val || 0));
               }
+
               tempSub += lineVal;
+
+              const isTip = item.is_tip || item.sku === "SYS_TIP" || item.name?.toLowerCase().includes("tip");
+              const isGiftCard = item.is_gift_card || item.sku === "SYS_GIFT_CARD" || item.name?.toLowerCase().includes("gift card");
+              const isSystemItem = String(item.sku || "").startsWith("SYS_");
+
+              if (!isTip && !isGiftCard && !isSystemItem) {
+                  discountableTempSub += lineVal;
+              }
           });
 
-          // Calculate global discount ratio
+          // Calculate global discount ratio against taxable/discountable items only.
           let ratio = 1.0;
-          if (Math.abs(tempSub) > 0.001) {
+          if (Math.abs(discountableTempSub) > 0.001) {
               let p_amt = 0;
               const p_val = promoDiscount.val || 0;
-              if (promoDiscount.type === "%") p_amt = tempSub * (p_val / 100);
-              else if (promoDiscount.type === "$") p_amt = tempSub > 0 ? p_val : -Math.abs(p_val);
+              if (promoDiscount.type === "%") p_amt = discountableTempSub * (p_val / 100);
+              else if (promoDiscount.type === "$") p_amt = discountableTempSub > 0 ? p_val : -Math.abs(p_val);
               
-              const sub_after = tempSub - p_amt;
+              const sub_after = discountableTempSub - p_amt;
               
               let m_amt = 0;
               const m_val = manualDiscount.val || 0;
               if (manualDiscount.type === "%") m_amt = sub_after * (m_val / 100);
               else if (manualDiscount.type === "$") m_amt = sub_after > 0 ? m_val : -Math.abs(m_val);
               
-              ratio = (sub_after - m_amt) / tempSub;
+              ratio = (sub_after - m_amt) / discountableTempSub;
           }
 
           if (isRefundMode && totals.origDiscountableSubtotal > 0.001) {
-              const currentDiscountableFinal = tempSub * ratio;
+              const currentDiscountableFinal = discountableTempSub * ratio;
               const historicalRatio = currentDiscountableFinal / totals.origDiscountableSubtotal;
               
               db_tax_val = parseFloat(refundData?.tax_val || 0) * historicalRatio;
               db_prov_tax_val = parseFloat(refundData?.prov_tax_val || 0) * historicalRatio;
-              
+
+              let rawFedTotal = 0.0;
+              let rawProvTotal = 0.0;
+
+              itemsToSave.forEach(item => {
+                  const surcharge = getItemSurcharge(item);
+                  let lineVal = (item.price + surcharge) * item.qty;
+
+                  if (item.disc_type === "%") {
+                      lineVal -= lineVal * (parseFloat(item.disc_val || 0) / 100);
+                  } else if (item.disc_type === "$") {
+                      if (lineVal < 0) lineVal += Math.abs(parseFloat(item.disc_val || 0));
+                      else lineVal -= Math.abs(parseFloat(item.disc_val || 0));
+                  }
+
+                  lineVal *= ratio;
+
+                  let fedCode = (item.tax_code || defaultTaxCodes.fed).toUpperCase();
+                  let provCode = (item.prov_tax_code || defaultTaxCodes.prov).toUpperCase();
+
+                  let fedRate = 0.0;
+                  let provRate = 0.0;
+
+                  if (fedCode !== "CUSTOM") {
+                      fedRate = taxRates[fedCode.toLowerCase()] || 0.0;
+                  }
+
+                  if (provCode !== "CUSTOM") {
+                      provRate = taxRates[provCode.toLowerCase()] || 0.0;
+                  }
+
+                  const isTip = item.is_tip || item.sku === "SYS_TIP" || item.name?.toLowerCase().includes("tip");
+                  const isGiftCard = item.is_gift_card || item.sku === "SYS_GIFT_CARD" || item.name?.toLowerCase().includes("gift card");
+
+                  if (isTip || isGiftCard || item.sku?.includes("SYS_")) {
+                      fedRate = 0.0;
+                      provRate = 0.0;
+                      fedCode = "Exempt";
+                      provCode = "Exempt";
+                  }
+
+                  item.mapped_tax_code = fedCode;
+                  item.mapped_prov_tax_code = provCode;
+                  item.tax_val = lineVal * fedRate;
+                  item.prov_tax_val = lineVal * provRate;
+
+                  rawFedTotal += item.tax_val;
+                  rawProvTotal += item.prov_tax_val;
+              });
+
+              const fedScale = Math.abs(rawFedTotal) > 0.001 ? db_tax_val / rawFedTotal : 0.0;
+              const provScale = Math.abs(rawProvTotal) > 0.001 ? db_prov_tax_val / rawProvTotal : 0.0;
+
+              // --- UPDATE ITEM-LEVEL TAXES FOR REFUND ---
+              itemsToSave.forEach(item => {
+                  item.tax_val = parseFloat(item.tax_val || 0) * fedScale;
+                  item.prov_tax_val = parseFloat(item.prov_tax_val || 0) * provScale;
+              });
+
               // Map labels based on province
               let fedLabel = "GST";
               let provLabel = "PST";
-              if (["ON", "NB", "NL", "NS", "PE"].includes(storeProvince)) { fedLabel = "HST"; provLabel = ""; }
-              else if (storeProvince === "MB") { provLabel = "RST"; }
-              else if (storeProvince === "QC") { provLabel = "QST"; }
-              else if (["AB", "NT", "NU", "YT"].includes(storeProvince)) { provLabel = ""; }
+
+              if (["ON", "NB", "NL", "NS", "PE"].includes(storeProvince)) {
+                  fedLabel = "HST";
+                  provLabel = "";
+              } else if (storeProvince === "BC") {
+                  fedLabel = "GST";
+                  provLabel = "PST";
+              } else if (storeProvince === "SK") {
+                  fedLabel = "GST";
+                  provLabel = "PST";
+              } else if (storeProvince === "MB") {
+                  fedLabel = "GST";
+                  provLabel = "RST";
+              } else if (["AB", "NT", "NU", "YT"].includes(storeProvince)) {
+                  fedLabel = "GST";
+                  provLabel = "";
+              }
 
               if (Math.abs(db_tax_val) > 0.005) tax_breakdown[fedLabel] = db_tax_val;
               if (Math.abs(db_prov_tax_val) > 0.005 && provLabel) tax_breakdown[provLabel] = db_prov_tax_val;
@@ -1927,15 +2068,8 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                   
                   lineVal *= ratio;
                   
-                  let fedCode = (item.tax_code || "HST").toUpperCase();
-                  let provCode = (item.prov_tax_code || "Exempt").toUpperCase();
-                  
-                  // Smart Province Tax Mapping
-                  if (fedCode === "HST" && ["AB", "BC", "MB", "QC", "SK", "NT", "NU", "YT"].includes(storeProvince)) {
-                      fedCode = "GST";
-                  } else if (fedCode === "GST" && ["ON", "NB", "NL", "NS", "PE"].includes(storeProvince)) {
-                      fedCode = "HST";
-                  }
+                  let fedCode = (item.tax_code || defaultTaxCodes.fed).toUpperCase();
+                  let provCode = (item.prov_tax_code || defaultTaxCodes.prov).toUpperCase();
 
                   let fedRate = 0.0;
                   let provRate = 0.0;
@@ -1959,6 +2093,12 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                   
                   const fedTaxAmt = lineVal * fedRate;
                   const provTaxAmt = lineVal * provRate;
+
+                  // --- ATTACH INDIVIDUAL TAX AMOUNTS FOR DB STORAGE ---
+                  item.tax_val = fedTaxAmt;
+                  item.prov_tax_val = provTaxAmt;
+                  item.mapped_tax_code = fedCode;
+                  item.mapped_prov_tax_code = provCode;
                   
                   db_tax_val += fedTaxAmt;
                   db_prov_tax_val += provTaxAmt;
@@ -2030,6 +2170,11 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
               cost: item.cost || 0.0, 
               disc_type: item.disc_type || null,
               disc_val: item.disc_val || 0,
+              // --- PUSH TAX ROUTING DATA TO DB ---
+              tax_code: item.mapped_tax_code || item.tax_code || 'Exempt',
+              prov_tax_code: item.mapped_prov_tax_code || item.prov_tax_code || 'Exempt',
+              tax_val: item.tax_val || 0,
+              prov_tax_val: item.prov_tax_val || 0,
               ingredients_snapshot: (item.ingredients && item.ingredients.length > 0) || item.card_number ? JSON.stringify({ 
                   base_price: item.price, 
                   ingredients: item.ingredients || [],

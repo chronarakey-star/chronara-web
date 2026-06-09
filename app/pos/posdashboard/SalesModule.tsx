@@ -474,18 +474,24 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
     const localDateStr = new Intl.DateTimeFormat('en-CA', { timeZone: localTz, year: 'numeric', month: '2-digit', day: '2-digit' }).format(saleDateObj);
     const localTimeStr = new Intl.DateTimeFormat('en-US', { timeZone: localTz, hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false }).format(saleDateObj);
 
-    // --- NEW: RECONSTRUCT TAX BREAKDOWN LABELS ---
+    // --- RECONSTRUCT TAX BREAKDOWN LABELS ---
     let fedLabel = "GST";
     let provLabel = "PST";
     
     if (["ON", "NB", "NL", "NS", "PE"].includes(storeProv)) {
         fedLabel = "HST";
         provLabel = "";
+    } else if (storeProv === "BC") {
+        fedLabel = "GST";
+        provLabel = "PST";
+    } else if (storeProv === "SK") {
+        fedLabel = "GST";
+        provLabel = "PST";
     } else if (storeProv === "MB") {
+        fedLabel = "GST";
         provLabel = "RST";
-    } else if (storeProv === "QC") {
-        provLabel = "QST";
     } else if (["AB", "NT", "NU", "YT"].includes(storeProv)) {
+        fedLabel = "GST";
         provLabel = "";
     }
 
@@ -526,7 +532,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   };
 
   // ==========================================
-  // --- NEW: THE 3-SECOND CLOUD HEARTBEAT ---
+  // --- CLOUD HEARTBEAT ---
   // ==========================================
   useEffect(() => {
     if (!companyId) return;
@@ -535,7 +541,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       try {
         let query = supabase
           .from("sales")
-          .select("*", { count: "exact", head: true })
+          .select("id", { count: "exact", head: true })
           .eq("company_id", companyId)
           .neq("is_deleted", true);
 
@@ -560,7 +566,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       }
     };
 
-    const intervalId = setInterval(pingCloudStatus, 3000);
+    const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
   }, [companyId, filterStore, filterUser, filterDate, searchQuery, page]);
   // ==========================================

@@ -4,6 +4,8 @@ import { useEffect, useState, useRef } from "react";
 import { supabase } from "../../utils/supabase"; 
 import { useRouter } from "next/navigation";
 
+const SHOW_INCOMPLETE_SCAN_BUTTON = 1; // 1 = show scan button, 0 = hide scan button
+const AUTO_SCAN_INCOMPLETE_ON_LOAD = 1; // 1 = scan automatically when page opens, 0 = do not auto-scan
 // ============================================================================
 // INTERFACES & CONSTANTS
 // ============================================================================
@@ -40,8 +42,33 @@ const QUANTITY_OPTIONS = [
 ];
 const UNIT_OPTIONS = ['g', 'ml', 'tsp', 'tbsp', 'cup', 'lb', 'oz', 'whole', 'pinch', 'clove', 'can', 'slice'];
 
+
+const INCOMPLETE_CATEGORY = "Incomplete";
+
+const recipeHasIngredients = (recipe: Pick<Recipe, 'ingredients'>) => {
+  return (recipe.ingredients || []).some(ing => ing.name?.trim() !== '');
+};
+
+const recipeHasInstructions = (recipe: Pick<Recipe, 'steps'>) => {
+  return (recipe.steps || []).some(step => step.text?.trim() !== '' || !!step.audio_url);
+};
+
+const getCategoriesWithIncompleteStatus = (recipe: Pick<Recipe, 'categories' | 'ingredients' | 'steps'>) => {
+  const currentCategories = recipe.categories || [];
+  const cleanCategories = currentCategories.filter(cat => cat !== INCOMPLETE_CATEGORY);
+
+  const hasIngredients = recipeHasIngredients(recipe);
+  const hasInstructions = recipeHasInstructions(recipe);
+
+  if (hasIngredients && hasInstructions) {
+    return cleanCategories;
+  }
+
+  return [...cleanCategories, INCOMPLETE_CATEGORY];
+};
+
 // ============================================================================
-// CONVERTER CONSTANTS & MATH ENGINE
+// CONVERTER CONSTANTS & MATH ENGINETH ENGINE
 // ============================================================================
 const KITCHEN_CONVERSIONS = {
   volume: { ml: 1, tsp: 4.92892, tbsp: 14.7868, 'fl oz': 29.5735, cup: 236.588, pint: 473.176, quart: 946.353, l: 1000, gal: 3785.41 },
@@ -202,6 +229,7 @@ export default function MamaDeeApp() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [imageUploading, setImageUploading] = useState(false);
+  const [quickScanning, setQuickScanning] = useState(false);
 
   // --- SETTINGS & AUTH STATE ---
   const [appPassword, setAppPassword] = useState("");
@@ -362,12 +390,12 @@ export default function MamaDeeApp() {
   };
   useEffect(() => {
     setAppPassword(localStorage.getItem('mamadee_password') || "");
-    fetchRecipes();
+    fetchRecipes(AUTO_SCAN_INCOMPLETE_ON_LOAD === 1);
   }, []);
 
 
 
-  const fetchRecipes = async () => {
+  const fetchRecipes = async (runIncompleteScan = false) => {
     setLoading(true);
     const { data, error } = await supabase.from('mamadee').select('*').order('title', { ascending: true });
     
@@ -396,7 +424,16 @@ export default function MamaDeeApp() {
           }
         }
       }
+
+      setLoading(false);
+
+      if (runIncompleteScan) {
+        await executeQuickScanIncomplete(fetchedRecipes, true);
+      }
+
+      return;
     }
+
     setLoading(false);
   };
 
@@ -407,6 +444,8 @@ export default function MamaDeeApp() {
     const matchesCategory = selectedCategoryFilter === "" || (r.categories || []).includes(selectedCategoryFilter);
     return matchesSearch && matchesCategory;
   });
+
+  const incompleteRecipeCount = recipes.filter(r => (r.categories || []).includes(INCOMPLETE_CATEGORY)).length;
 
   useEffect(() => {
     if (view !== 'library') return;
@@ -503,6 +542,7 @@ export default function MamaDeeApp() {
   // ============================================================================
   const handleAddRecipe = () => requireAuth('add');
   const handleAiImportBtn = () => requireAuth('ai_import');
+  const handleQuickScanIncomplete = () => requireAuth('quick_scan_incomplete');
   const handleEditRecipe = (recipe: Recipe) => requireAuth('edit', recipe);
   
   const handleDuplicateRecipe = (e: React.MouseEvent, recipe: Recipe) => {
@@ -532,6 +572,8 @@ export default function MamaDeeApp() {
       setAiInputText("");
       setAiInputMode("url");
       setShowAiModal(true);
+    } else if (actionType === 'quick_scan_incomplete') {
+      await executeQuickScanIncomplete();
     } else if (actionType === 'edit') {
       setFormData({ 
         ...payload, 
@@ -551,6 +593,58 @@ export default function MamaDeeApp() {
   // ============================================================================
   // CORE EXECUTORS
   // ============================================================================
+  const executeQuickScanIncomplete = async (sourceRecipes: Recipe[] = recipes, automatic = false) => {
+    setQuickScanning(true);
+    if (!automatic) setLoading(true);
+
+    let updatedCount = 0;
+    let newlyMarkedIncompleteCount = 0;
+
+    for (const recipe of sourceRecipes) {
+      const updatedCategories = getCategoriesWithIncompleteStatus(recipe);
+      const currentCategories = recipe.categories || [];
+      const categoriesChanged = JSON.stringify([...currentCategories].sort()) !== JSON.stringify([...updatedCategories].sort());
+
+      const wasIncomplete = currentCategories.includes(INCOMPLETE_CATEGORY);
+      const isNowIncomplete = updatedCategories.includes(INCOMPLETE_CATEGORY);
+
+      if (categoriesChanged) {
+        const { error } = await supabase
+          .from('mamadee')
+          .update({ categories: updatedCategories })
+          .eq('id', recipe.id);
+
+        if (error) {
+          console.error("Incomplete scan update error:", error);
+        } else {
+          updatedCount++;
+
+          if (!wasIncomplete && isNowIncomplete) {
+            newlyMarkedIncompleteCount++;
+          }
+        }
+      }
+    }
+
+    await fetchRecipes(false);
+
+    setQuickScanning(false);
+    if (!automatic) setLoading(false);
+
+    if (automatic) {
+      if (newlyMarkedIncompleteCount === 1) {
+        alert("1 recipe has been added to the incomplete list.");
+      } else if (newlyMarkedIncompleteCount > 1) {
+        alert(`${newlyMarkedIncompleteCount} recipes have been added to the incomplete list.`);
+      }
+
+      return;
+    }
+
+    alert(updatedCount === 1 ? "1 recipe category was updated." : `${updatedCount} recipe categories were updated.`);
+  };
+
+  
   const executeDuplicate = async (recipe: Recipe) => {
     setLoading(true);
     const { id, ...recipeWithoutId } = recipe; 
@@ -660,11 +754,19 @@ export default function MamaDeeApp() {
     if (!formData.title) return alert("Recipe needs a title!");
     setSaving(true);
 
+    const cleanedIngredients = formData.ingredients.filter(ing => ing.name.trim() !== '');
+    const cleanedSteps = formData.steps.filter(step => step.text.trim() !== '' || !!step.audio_url);
+
     const cleanedFormData = {
       ...formData,
-      ingredients: formData.ingredients.filter(ing => ing.name.trim() !== ''),
-      steps: formData.steps.filter(step => step.text.trim() !== '' || !!step.audio_url),
-      servings: typeof formData.servings === 'string' ? parseFloat(formData.servings) || 1 : formData.servings
+      ingredients: cleanedIngredients,
+      steps: cleanedSteps,
+      servings: typeof formData.servings === 'string' ? parseFloat(formData.servings) || 1 : formData.servings,
+      categories: getCategoriesWithIncompleteStatus({
+        ...formData,
+        ingredients: cleanedIngredients,
+        steps: cleanedSteps
+      })
     };
 
     if (cleanedFormData.id) {
@@ -1264,9 +1366,17 @@ export default function MamaDeeApp() {
           {/* LOGO AND TITLE */}
           <div className="flex items-center gap-2 md:gap-4 overflow-hidden">
             <img src="/mamalogo.png" alt="Mama Dee's Logo" className="w-8 h-8 md:w-12 md:h-12 object-contain drop-shadow-md shrink-0" />
-            <h1 className="text-lg sm:text-xl md:text-4xl font-bold text-[#C53636] leading-tight truncate">
-              Mama Dee's Recipes
-            </h1>
+            <div className="flex items-baseline gap-2 min-w-0">
+              <h1 className="text-lg sm:text-xl md:text-4xl font-bold text-[#C53636] leading-tight truncate">
+                Mama Dee's Recipes
+              </h1>
+
+              {incompleteRecipeCount > 0 && (
+                <span className="text-xs sm:text-sm md:text-lg font-bold text-orange-400 whitespace-nowrap">
+                  ({incompleteRecipeCount} incomplete {incompleteRecipeCount === 1 ? 'recipe' : 'recipes'})
+                </span>
+              )}
+            </div>
           </div>
 
           {/* BUTTONS */}
@@ -1283,6 +1393,11 @@ export default function MamaDeeApp() {
             <button onClick={() => setView('converter')} title="Kitchen Math" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
               🔄<span className="hidden md:inline md:ml-2">Math</span>
             </button>
+            {SHOW_INCOMPLETE_SCAN_BUTTON === 1 && (
+              <button onClick={handleQuickScanIncomplete} disabled={quickScanning || loading} title="Scan for incomplete recipes" className="bg-[#444] hover:bg-[#555] disabled:opacity-50 disabled:cursor-not-allowed w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
+                {quickScanning ? '...' : '🔎'}<span className="hidden md:inline md:ml-2">{quickScanning ? 'Scanning' : 'Scan'}</span>
+              </button>
+            )}
             <button onClick={() => requireAuth('settings')} title="Settings" className="bg-[#444] hover:bg-[#555] w-9 h-9 md:w-auto md:h-auto md:px-4 md:py-2 rounded-md font-bold transition-colors shadow-md text-sm md:text-base border border-[#555] flex items-center justify-center shrink-0">
               ⚙️<span className="hidden md:inline md:ml-2">Settings</span>
             </button>
@@ -1320,7 +1435,11 @@ export default function MamaDeeApp() {
             {filteredRecipes.length > 0 ? (
               filteredRecipes.map((recipe) => (
                 // --- UPDATE THIS CLICK EVENT ---
-                <div id={`recipe-card-${recipe.id}`} key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; libraryRestoreRecipeIdRef.current = String(recipe.id); setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className="relative bg-[#2D2D2D] border border-[#444] rounded-xl cursor-pointer hover:border-[#C53636] transition-all shadow-lg overflow-hidden flex flex-col">
+                <div id={`recipe-card-${recipe.id}`} key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; libraryRestoreRecipeIdRef.current = String(recipe.id); setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className={`relative bg-[#2D2D2D] border rounded-xl cursor-pointer transition-all shadow-lg overflow-hidden flex flex-col ${
+                    (recipe.categories || []).includes(INCOMPLETE_CATEGORY)
+                      ? 'border-4 border-red-600 ring-2 ring-red-600/60 hover:border-red-400'
+                      : 'border-[#444] hover:border-[#C53636]'
+                  }`}>
                   
                   {/* --- 3-DOT MENU BUTTON --- */}
                   <button

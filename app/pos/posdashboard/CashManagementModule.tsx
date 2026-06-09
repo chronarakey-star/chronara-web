@@ -148,7 +148,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
 
   // ==========================================
-  // --- NEW: THE 3-SECOND CLOUD HEARTBEAT ---
+  // --- CLOUD HEARTBEAT ---
   // ==========================================
   useEffect(() => {
     if (!companyId) return;
@@ -169,7 +169,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
         // 2. Check Session Count for live list updates
         let query = supabase
           .from("cash_sessions")
-          .select("*", { count: "exact", head: true }) 
+          .select("id", { count: "exact", head: true }) 
           .eq("company_id", companyId)
           .neq("is_deleted", true);
 
@@ -199,7 +199,7 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
       }
     };
 
-    const intervalId = setInterval(pingCloudStatus, 3000);
+    const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
   }, [companyId, storeId, page, filterType, filterUser, filterDate, searchQuery]);
   // ==========================================

@@ -8,6 +8,7 @@ interface OpenCloseProps {
   storeId: string;
   themeColor: string;
   user: any;
+  setActiveModule: (module: string) => void;
 }
 
 const DENOMINATIONS = [
@@ -39,7 +40,56 @@ const getStoreTimezone = (province: string, isAllStores: boolean) => {
     return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
 };
 
-export default function OpenCloseModule({ companyId, storeId, themeColor, user }: OpenCloseProps) {
+const normalizeProvince = (province?: string) => {
+    return (province || "ON").trim().toUpperCase();
+};
+
+const getFederalTaxPayableAccount = (taxCode?: string) => {
+    const code = (taxCode || "Exempt").trim().toUpperCase();
+
+    if (["GST", "HST", "HST/GST", "GST/HST"].includes(code)) {
+        return "HST/GST Payable";
+    }
+
+    if (["", "E", "EXEMPT", "ZERO-RATED", "NONE"].includes(code)) {
+        return null;
+    }
+
+    return `${taxCode} Payable`;
+};
+
+const getProvincialTaxPayableAccount = (province?: string, taxCode?: string) => {
+    const prov = normalizeProvince(province);
+    const code = (taxCode || "Exempt").trim().toUpperCase();
+
+    if (["", "E", "EXEMPT", "ZERO-RATED", "NONE"].includes(code)) {
+        return null;
+    }
+
+    if (code === "PST") {
+        if (prov === "BC") return "BC PST Payable";
+        if (prov === "SK") return "SK PST Payable";
+        return null;
+    }
+
+    if (code === "RST") {
+        if (prov === "MB") return "MB RST Payable";
+        return null;
+    }
+
+    return null;
+};
+
+const getDefaultProvincialTaxCode = (province?: string) => {
+    const prov = normalizeProvince(province);
+
+    if (["BC", "SK"].includes(prov)) return "PST";
+    if (prov === "MB") return "RST";
+
+    return "Exempt";
+};
+
+export default function OpenCloseModule({ companyId, storeId, themeColor, user, setActiveModule }: OpenCloseProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [storeName, setStoreName] = useState("");
@@ -55,6 +105,9 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
   const [expectedCash, setExpectedCash] = useState(0.0);
   const [activePayments, setActivePayments] = useState<string[]>(["Debit", "Visa", "Mastercard"]);
   const [expectedNonCash, setExpectedNonCash] = useState<Record<string, number>>({});
+  
+  // --- NEW: Tracks Cloud License Status ---
+  const [hasBookkeeping, setHasBookkeeping] = useState(false);
   
   // Inputs
   const [denomCounts, setDenomCounts] = useState<Record<string, string>>({});
@@ -86,13 +139,30 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
       if (storeId && storeId !== "ALL_STORES") {
         const { data: sData } = await supabase.from('stores').select('name, province').eq('id', storeId).single();
         if (sData?.name) sName = sData.name;
-        if (sData?.province) sProv = sData.province.toUpperCase();
+        if (sData?.province) sProv = normalizeProvince(sData.province);
       } else {
         const { data: cData } = await supabase.from('companies').select('province').eq('id', companyId).single();
-        if (cData?.province) sProv = cData.province.toUpperCase();
+        if (cData?.province) sProv = normalizeProvince(cData.province);
       }
       setStoreName(sName);
-      setStoreProvince(sProv);
+      setStoreProvince(normalizeProvince(sProv));
+
+      // --- NEW: CLOUD LICENSE VERIFICATION ---
+      const { data: licenses } = await supabase
+        .from('licenses')
+        .select('module')
+        .eq('claimed_by_company', companyId)
+        .eq('is_active', true);
+
+      let ownsBooks = false;
+      if (licenses) {
+        ownsBooks = licenses.some(lic => {
+          const mod = (lic.module || "").toUpperCase();
+          return mod === 'SUITE' || mod === 'BOOKS' || mod.includes('BOOKS') || mod.includes('SUITE');
+        });
+      }
+      setHasBookkeeping(ownsBooks);
+      // ---------------------------------------
 
       const { data: compData } = await supabase.from('companies').select('config_json').eq('id', companyId).single();
       let isBlind = true;
@@ -159,7 +229,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
   };
 
   // ==========================================
-  // --- NEW: THE 3-SECOND CLOUD HEARTBEAT ---
+  // --- CLOUD HEARTBEAT ---
   // ==========================================
   useEffect(() => {
     if (!companyId) return;
@@ -199,7 +269,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
       }
     };
 
-    const intervalId = setInterval(pingCloudStatus, 3000);
+    const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId); // Cleanup on dismount
   }, [companyId, storeId]);
   // ==========================================
@@ -225,86 +295,77 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
   const calculateExpectations = async (sinceTs: number, openingFloat: number, currentMethods: string[]) => {
     try {
-      // --- THE FIX: STRICT UTC RULE ---
-      // We convert the epoch timestamp directly into a strict UTC ISO string
-      const sinceStr = new Date(sinceTs * 1000).toISOString(); 
-
+      const sinceStr = new Date(sinceTs * 1000).toISOString();
       const targetStoreId = storeId === "ALL_STORES" ? null : storeId;
 
       const parseMoney = (val: any) => {
-          if (val === null || val === undefined) return 0;
-          if (typeof val === 'number') return val;
-          const str = String(val).replace(/[^0-9.-]+/g, "");
-          return parseFloat(str) || 0;
+        if (val === null || val === undefined) return 0;
+        if (typeof val === "number") return val;
+        const str = String(val).replace(/[^0-9.-]+/g, "");
+        return parseFloat(str) || 0;
       };
 
-      // Cash Drops/Adds (Cash sessions explicitly manage is_deleted, so we keep the filter here)
-      let dropsQuery = supabase.from('cash_sessions')
-        .select('total')
-        .eq('company_id', companyId)
-        .gte('timestamp', sinceTs)
-        .in('type', ['Add Cash', 'Remove Cash'])
-        .neq('is_deleted', true);
-      
-      if (targetStoreId) dropsQuery = dropsQuery.eq('store_id', targetStoreId);
-      else dropsQuery = dropsQuery.is('store_id', null);
+      let dropsQuery = supabase
+        .from("cash_sessions")
+        .select("total")
+        .eq("company_id", companyId)
+        .gte("timestamp", sinceTs)
+        .in("type", ["Add Cash", "Remove Cash"])
+        .neq("is_deleted", true);
 
-      const dropsData = await fetchAll(dropsQuery);
-      const netDrops = dropsData.reduce((acc, row) => acc + parseMoney(row.total), 0);
+      if (targetStoreId) dropsQuery = dropsQuery.eq("store_id", targetStoreId);
+      else dropsQuery = dropsQuery.is("store_id", null);
 
-      // Cash Sales (Removed is_deleted filter to match Python SQLite behavior)
-      let salesQuery = supabase.from('sales')
-        .select('id, total')
-        .eq('company_id', companyId)
-        .gte('date', sinceStr)
-        .eq('method', 'Cash');
+      const dropsData = await fetchAll(dropsQuery);
+      const netDrops = dropsData.reduce((acc, row) => acc + parseMoney(row.total), 0);
 
-      if (targetStoreId) salesQuery = salesQuery.eq('store_id', targetStoreId);
-      else salesQuery = salesQuery.is('store_id', null);
+      let allSalesQuery = supabase
+        .from("sales")
+        .select("id")
+        .eq("company_id", companyId)
+        .gte("date", sinceStr)
+        .neq("is_deleted", true);
 
-      const salesData = await fetchAll(salesQuery);
-      const cashSales = salesData.reduce((acc, row) => acc + parseMoney(row.total), 0);
+      if (targetStoreId) allSalesQuery = allSalesQuery.eq("store_id", targetStoreId);
+      else allSalesQuery = allSalesQuery.is("store_id", null);
 
-      setExpectedCash(openingFloat + netDrops + cashSales);
+      const allSalesData = await fetchAll(allSalesQuery);
+      const saleIds = allSalesData.map((s: any) => s.id);
 
-      // Non-Cash Expectations
-      let allSalesQuery = supabase.from('sales')
-        .select('id')
-        .eq('company_id', companyId)
-        .gte('date', sinceStr);
-        
-      if (targetStoreId) allSalesQuery = allSalesQuery.eq('store_id', targetStoreId);
-      else allSalesQuery = allSalesQuery.is('store_id', null);
+      let cashSales = 0.0;
+      const ncTotals: Record<string, number> = {};
+      currentMethods.forEach((m) => (ncTotals[m] = 0.0));
 
-      const allSalesData = await fetchAll(allSalesQuery);
-      const saleIds = allSalesData.map(s => s.id);
+      if (saleIds.length > 0) {
+        const chunkSize = 100;
+        let allPayments: any[] = [];
 
-      const ncTotals: Record<string, number> = {};
-      currentMethods.forEach(m => ncTotals[m] = 0.0);
+        for (let i = 0; i < saleIds.length; i += chunkSize) {
+          const chunk = saleIds.slice(i, i + chunkSize);
+          const paymentsData = await fetchAll(
+            supabase.from("sale_payments").select("method, amount").in("sale_id", chunk)
+          );
+          allPayments = allPayments.concat(paymentsData);
+        }
 
-      if (saleIds.length > 0) {
-         // Chunking array to prevent URL overflow on huge shifts
-         const chunkSize = 100;
-         let allPayments: any[] = [];
-         for (let i = 0; i < saleIds.length; i += chunkSize) {
-             const chunk = saleIds.slice(i, i + chunkSize);
-             const paymentsData = await fetchAll(supabase.from('sale_payments').select('method, amount').in('sale_id', chunk));
-             allPayments = allPayments.concat(paymentsData);
-         }
-         
-         allPayments.forEach(p => {
-            const m = p.method;
-            if (m && m.toLowerCase() !== 'cash') {
-               ncTotals[m] = (ncTotals[m] || 0) + parseMoney(p.amount);
-            }
-         });
-      }
-      setExpectedNonCash(ncTotals);
+        allPayments.forEach((p) => {
+          const method = p.method || "";
+          const amount = parseMoney(p.amount);
 
-    } catch (e) {
-      console.error("Error calculating expectations:", e);
-    }
-  };
+          if (method.toLowerCase() === "cash") {
+            cashSales += amount;
+          } else if (method) {
+            ncTotals[method] = (ncTotals[method] || 0) + amount;
+          }
+        });
+      }
+
+      setExpectedCash(openingFloat + netDrops + cashSales);
+      setExpectedNonCash(ncTotals);
+    } catch (e) {
+      console.error("Error calculating expectations:", e);
+    }
+  };
 
   // --- CALCULATION HELPERS ---
   const currentCashTotal = useMemo(() => {
@@ -321,46 +382,46 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
   // --- SAVE & Z-REPORT LOGIC ---
   const handleSave = async () => {
-    if (currentCashTotal === 0 && !window.confirm(`Total cash ${sessionType} is $0.00. Are you sure?`)) {
-      return;
-    }
+    if (currentCashTotal === 0 && !window.confirm(`Total cash ${sessionType} is $0.00. Are you sure?`)) {
+      return;
+    }
 
-    setIsSaving(true);
+    setIsSaving(true);
 
-    // =======================================================
-    // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
-    // =======================================================
-    try {
-      let query = supabase
-        .from('cash_sessions')
-        .select('type')
-        .eq('company_id', companyId)
-        .in('type', ['Open', 'Close'])
-        .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
-        .limit(1);
+    // =======================================================
+    // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
+    // =======================================================
+    try {
+      let query = supabase
+        .from('cash_sessions')
+        .select('type')
+        .eq('company_id', companyId)
+        .in('type', ['Open', 'Close'])
+        .neq('is_deleted', true)
+        .order('timestamp', { ascending: false })
+        .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
-      else query = query.is('store_id', null);
+      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
+      else query = query.is('store_id', null);
 
-      const { data: preSaveData, error: preSaveError } = await query;
-      if (!preSaveError && preSaveData && preSaveData.length > 0) {
-        const cloudLastType = preSaveData[0].type;
-        const expectedNextAction = cloudLastType === "Open" ? "Close" : "Open";
-        
-        if (expectedNextAction !== sessionTypeRef.current) {
-            const msgAction = cloudLastType === "Open" ? "opened" : "closed";
-            alert(`Conflict: Store is already ${msgAction} on another device.\nThe screen will now refresh.`);
-            setIsSaving(false);
-            loadSessionData();
-            return; 
-        }
-      }
-    } catch (err) {
-      console.warn("Pre-save verification bypassed due to network error", err);
-    }
+      const { data: preSaveData, error: preSaveError } = await query;
+      if (!preSaveError && preSaveData && preSaveData.length > 0) {
+        const cloudLastType = preSaveData[0].type;
+        const expectedNextAction = cloudLastType === "Open" ? "Close" : "Open";
+        
+        if (expectedNextAction !== sessionTypeRef.current) {
+            const msgAction = cloudLastType === "Open" ? "opened" : "closed";
+            alert(`Conflict: Store is already ${msgAction} on another device.\nThe screen will now refresh.`);
+            setIsSaving(false);
+            loadSessionData();
+            return; 
+        }
+      }
+    } catch (err) {
+      console.warn("Pre-save verification bypassed due to network error", err);
+    }
 
-    try {
+    try {
       // --- STRICT UTC RULE ---
       const now = new Date();
       const nowIso = now.toISOString();
@@ -424,7 +485,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
          });
       }
 
-      // 1. Save Cash Session
+      // 1. Save Cash Session (Always runs)
       const { error: sessionError } = await supabase.from('cash_sessions').insert([{
          id: sessionId,
          date: nowIso, 
@@ -445,51 +506,21 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
       // ==========================================
       // PHASE 4: BOOKKEEPING INTEGRATION (Z-REPORT)
       // ==========================================
-      if (sessionType === "Close") {
-
-          const fedAccount = ["ON", "NB", "NL", "NS", "PE"].includes(storeProvince) ? "HST Payable" : "GST Payable";
-          let provAccount = "PST Payable";
-          if (storeProvince === "MB") provAccount = "RST Payable";
-          else if (storeProvince === "QC") provAccount = "QST Payable";
-
-          // A. Dynamically Ensure System Accounts Exist
-          const sysAccounts = [
-              { name: "Cash Over/Short", type: "Expense", tax: "Exempt" },
-              { name: "Tips Payable", type: "Current Liability", tax: "Exempt" },
-              { name: "Gift Card Payable", type: "Current Liability", tax: "Exempt" },
-              { name: "Commission Payable", type: "Current Liability", tax: "Exempt" },
-              { name: "Commission Expense", type: "Expense", tax: "Exempt" },
-              { name: "Cost of Goods Sold", type: "Expense", tax: "Exempt" },
-              { name: "Inventory Asset", type: "Current Asset", tax: "Exempt" },
-              { name: fedAccount, type: "Current Liability", tax: "Exempt" },
-              { name: provAccount, type: "Current Liability", tax: "Exempt" }
-          ];
-
-          const { data: existingAccs } = await supabase.from('chart_of_accounts').select('name').eq('company_id', companyId).in('name', sysAccounts.map(a => a.name));
-          const existingNames = existingAccs?.map(a => a.name) || [];
-
-          for (const acc of sysAccounts) {
-              if (!existingNames.includes(acc.name)) {
-                  const safeName = acc.name.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                  await supabase.from('chart_of_accounts').insert([{
-                      id: `acc_def_${safeName}`,
-                      company_id: companyId,
-                      name: acc.name,
-                      account_type: acc.type,
-                      default_tax: acc.tax,
-                      is_prime: 1,
-                      parent_name: ''
-                  }]);
-              }
-          }
+      if (sessionType === "Close" && hasBookkeeping) {
 
           // B. Aggregate Data for the Shift
-          // --- THE FIX: STRICT UTC FOR SALES QUERY ---
           const sinceIso = new Date(lastOpenTimestamp * 1000).toISOString();
           
-          let shiftSalesQuery = supabase.from('sales').select('id, total, tax_val, prov_tax_val').eq('company_id', companyId).gte('date', sinceIso);
-          if (targetStoreId) shiftSalesQuery = shiftSalesQuery.eq('store_id', targetStoreId);
-          else shiftSalesQuery = shiftSalesQuery.is('store_id', null);
+          let shiftSalesQuery = supabase
+            .from("sales")
+            .select("id, total, tax_val, prov_tax_val")
+            .eq("company_id", companyId)
+            .gte("date", sinceIso)
+            .lte("date", nowIso)
+            .neq("is_deleted", true);
+
+          if (targetStoreId) shiftSalesQuery = shiftSalesQuery.eq("store_id", targetStoreId);
+          else shiftSalesQuery = shiftSalesQuery.is("store_id", null);
 
           const shiftSales = await fetchAll(shiftSalesQuery);
           const saleIds = shiftSales.map(s => s.id);
@@ -509,6 +540,13 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
           let shiftCommissions = 0;
           let gcLoads = 0;
           let totalCogs = 0;
+          let serviceSales = 0;
+          
+          const productLookup: Record<string, any> = {};
+          const ingredientParentSkus = new Set<string>();
+          const dynamicTaxMap: Record<string, number> = {};
+          let fedTaxRouted = 0.0;
+          let provTaxRouted = 0.0;
 
           if (saleIds.length > 0) {
              const chunkSize = 100;
@@ -521,7 +559,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
                  const [tipsData, commsData, itemsData] = await Promise.all([
                      fetchAll(supabase.from('tips_ledger').select('amount').in('sale_id', chunk)),
                      fetchAll(supabase.from('commissions_ledger').select('amount').in('sale_id', chunk)),
-                     fetchAll(supabase.from('sale_items').select('sku, qty, price, cost').in('sale_id', chunk))
+                     fetchAll(supabase.from('sale_items').select('sku, product_id, qty, price, cost, tax_code, prov_tax_code, tax_val, prov_tax_val, is_damaged').in('sale_id', chunk))
                  ]);
                  allTips = allTips.concat(tipsData);
                  allComms = allComms.concat(commsData);
@@ -531,56 +569,244 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
              shiftTips = allTips.reduce((sum, t) => sum + parseMoney(t.amount), 0);
              shiftCommissions = allComms.reduce((sum, c) => sum + parseMoney(c.amount), 0);
 
+             const productIds = Array.from(
+                 new Set(
+                     allItems
+                         .map(item => item.product_id)
+                         .filter(id => id !== null && id !== undefined && String(id).trim() !== "")
+                         .map(id => String(id))
+                 )
+             );
+
+             const itemSkus = Array.from(
+                 new Set(
+                     allItems
+                         .map(item => item.sku)
+                         .filter(sku => sku !== null && sku !== undefined && String(sku).trim() !== "")
+                         .map(sku => String(sku))
+                 )
+             );
+
+             if (productIds.length > 0) {
+                 for (let i = 0; i < productIds.length; i += 100) {
+                     const chunk = productIds.slice(i, i + 100);
+                     const productsById = await fetchAll(
+                         supabase
+                             .from("products")
+                             .select("id, sku, store_id, track_inventory")
+                             .eq("company_id", companyId)
+                             .in("id", chunk)
+                     );
+
+                     productsById.forEach((p: any) => {
+                         if (p.id) productLookup[`id:${String(p.id)}`] = p;
+                         if (p.sku) productLookup[`sku:${String(p.sku)}`] = p;
+                     });
+                 }
+             }
+
+             if (itemSkus.length > 0) {
+                 for (let i = 0; i < itemSkus.length; i += 100) {
+                     const chunk = itemSkus.slice(i, i + 100);
+                     const productsBySku = await fetchAll(
+                         supabase
+                             .from("products")
+                             .select("id, sku, store_id, track_inventory")
+                             .eq("company_id", companyId)
+                             .in("sku", chunk)
+                     );
+
+                     productsBySku.forEach((p: any) => {
+                         if (p.id) productLookup[`id:${String(p.id)}`] = p;
+                         if (p.sku) productLookup[`sku:${String(p.sku)}`] = p;
+                     });
+                 }
+
+                 for (let i = 0; i < itemSkus.length; i += 100) {
+                     const chunk = itemSkus.slice(i, i + 100);
+                     const ingredients = await fetchAll(
+                         supabase
+                             .from("product_ingredients")
+                             .select("parent_sku")
+                             .eq("company_id", companyId)
+                             .in("parent_sku", chunk)
+                     );
+
+                     ingredients.forEach((ing: any) => {
+                         if (ing.parent_sku) ingredientParentSkus.add(String(ing.parent_sku));
+                     });
+                 }
+             }
+
              allItems.forEach(item => {
                  const qty = parseMoney(item.qty);
                  const price = parseMoney(item.price);
                  const cost = parseMoney(item.cost);
 
-                 if (item.sku === 'SYS_GIFT_CARD') {
+                 const isDamagedRefundItem =
+                     item.is_damaged === true ||
+                     item.is_damaged === 1 ||
+                     item.is_damaged === "1" ||
+                     String(item.is_damaged).toLowerCase() === "true";
+
+                 const sku = item.sku ? String(item.sku) : "";
+                 const product =
+                     (item.product_id ? productLookup[`id:${String(item.product_id)}`] : null) ||
+                     (sku ? productLookup[`sku:${sku}`] : null);
+
+                 const trackInventoryRaw = product?.track_inventory;
+                 const tracksInventory =
+                     trackInventoryRaw === true ||
+                     trackInventoryRaw === 1 ||
+                     trackInventoryRaw === "1" ||
+                     String(trackInventoryRaw).toLowerCase() === "true";
+
+                 const productSku = product?.sku ? String(product.sku) : sku;
+                 const hasIngredients = productSku ? ingredientParentSkus.has(productSku) : false;
+                 const isServiceItem =
+                     sku !== "SYS_GIFT_CARD" &&
+                     sku !== "SYS_TIP" &&
+                     product &&
+                     !tracksInventory &&
+                     !hasIngredients;
+
+                 if (sku === 'SYS_GIFT_CARD') {
                      gcLoads += (qty * price);
                  } else {
-                     totalCogs += (qty * cost);
+                     if (isServiceItem) {
+                         serviceSales += (qty * price);
+                     }
+
+                     if (!isServiceItem && !isDamagedRefundItem && (tracksInventory || hasIngredients)) {
+                         // Damaged / non-restocked refunds should NOT reverse COGS or Inventory Asset.
+                         totalCogs += (qty * cost);
+                     }
+                 }
+                 
+                 // --- CLEAN TAX ACCOUNT AGGREGATION ---
+                 const tCode = item.tax_code || 'Exempt';
+                 const pCode = item.prov_tax_code || 'Exempt';
+                 const tVal = parseMoney(item.tax_val);
+                 const pVal = parseMoney(item.prov_tax_val);
+
+                 const fedAccName = getFederalTaxPayableAccount(tCode);
+                 if (fedAccName && Math.abs(tVal) > 0.005) {
+                     dynamicTaxMap[fedAccName] = (dynamicTaxMap[fedAccName] || 0) + tVal;
+                     fedTaxRouted += tVal;
+                 }
+
+                 const provAccName = getProvincialTaxPayableAccount(storeProvince, pCode);
+                 if (provAccName && Math.abs(pVal) > 0.005) {
+                     dynamicTaxMap[provAccName] = (dynamicTaxMap[provAccName] || 0) + pVal;
+                     provTaxRouted += pVal;
                  }
              });
           }
 
-          // Use the isolated tax amounts to figure out exact net sales
           const netSales = grossSales - fedTaxTotal - provTaxTotal - shiftTips - gcLoads;
+          const productSales = netSales - serviceSales;
 
-          // C. Create Master Journal Entry
+          const fedAccountFallback = "HST/GST Payable";
+
+          const defaultProvTaxCode = getDefaultProvincialTaxCode(storeProvince);
+          const provAccountFallback = getProvincialTaxPayableAccount(storeProvince, defaultProvTaxCode);
+
+          const fedRemainder = fedTaxTotal - fedTaxRouted;
+          if (Math.abs(fedRemainder) > 0.001) {
+              dynamicTaxMap[fedAccountFallback] = (dynamicTaxMap[fedAccountFallback] || 0) + fedRemainder;
+          }
+
+          const provRemainder = provTaxTotal - provTaxRouted;
+          if (Math.abs(provRemainder) > 0.001 && provAccountFallback) {
+              dynamicTaxMap[provAccountFallback] = (dynamicTaxMap[provAccountFallback] || 0) + provRemainder;
+          }
+
+          const sysAccounts = [
+              { name: "Cash Over/Short", type: "Expense", tax: "Exempt" },
+              { name: "Tips Payable", type: "Current Liability", tax: "Exempt" },
+              { name: "Gift Card Payable", type: "Current Liability", tax: "Exempt" },
+              { name: "Commission Payable", type: "Current Liability", tax: "Exempt" },
+              { name: "Commission Expense", type: "Expense", tax: "Exempt" },
+              { name: "Cost of Goods Sold", type: "Cost of Goods Sold", tax: "Exempt" },
+              { name: "Inventory Asset", type: "Current Asset", tax: "Exempt" },
+              { name: "Service Revenue", type: "Income", tax: "Taxable" }
+          ];
+          
+          Object.keys(dynamicTaxMap).forEach(accName => {
+              sysAccounts.push({ name: accName, type: "Current Liability", tax: "Exempt" });
+          });
+
+          const { data: existingAccs } = await supabase.from('chart_of_accounts').select('name').eq('company_id', companyId).in('name', sysAccounts.map(a => a.name));
+          const existingNames = existingAccs?.map(a => a.name) || [];
+
+          await supabase
+              .from('chart_of_accounts')
+              .update({ account_type: "Cost of Goods Sold" })
+              .eq('company_id', companyId)
+              .eq('name', "Cost of Goods Sold")
+              .eq('account_type', "Expense");
+
+          for (const acc of sysAccounts) {
+              if (!existingNames.includes(acc.name)) {
+                  const safeName = acc.name.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+                  await supabase.from('chart_of_accounts').insert([{
+                      id: `acc_def_${safeName}`,
+                      company_id: companyId,
+                      name: acc.name,
+                      account_type: acc.type,
+                      default_tax: acc.tax,
+                      is_prime: 1,
+                      parent_name: ''
+                  }]);
+              }
+          }
+
           const jeId = `je_${crypto.randomUUID().replace(/-/g, "")}`;
           const totalVariance = cashVariance + ncVarianceTotal;
           const varStr = totalVariance > 0 ? `+$${totalVariance.toFixed(2)}` : `-$${Math.abs(totalVariance).toFixed(2)}`;
           const jeDesc = Math.abs(totalVariance) > 0.01 ? `End of Day Z-Report (Variance: ${varStr})` : "End of Day Z-Report (Balanced)";
 
           const { error: jeError } = await supabase.from('journal_entries').insert([{
-             id: jeId,
-             company_id: companyId,
-             store_id: targetStoreId,
-             date: nowIso, // <--- THE FIX: Send the full UTC string
-             type: 'Z-Report',
-             ref_number: sessionId,
-             total_amount: grossSales, 
-             description: jeDesc,
-             created_at: nowIso, 
-             username: user?.username || "System"
+              id: jeId,
+              company_id: companyId,
+              store_id: targetStoreId,
+              date: nowIso, 
+              type: 'Z-Report',
+              ref_number: sessionId,
+              total_amount: grossSales, 
+              description: jeDesc,
+              created_at: nowIso, 
+              username: user?.username || "System"
           }]);
           if (jeError) throw new Error(`Failed to create Journal Entry: ${jeError.message}`);
 
           const lines: any[] = [];
           const addLine = (account: string, debit: number, credit: number) => {
               if (Math.abs(debit) < 0.001 && Math.abs(credit) < 0.001) return;
-              lines.push({ id: getNextId(), entry_id: jeId, account, debit, credit });
+
+              lines.push({
+                  id: getNextId(),
+                  entry_id: jeId,
+                  company_id: companyId,
+                  account,
+                  debit,
+                  credit,
+                  created_at: nowIso,
+                  updated_at: nowIso,
+                  is_deleted: false
+              });
           };
           
-          if (netSales > 0) addLine('Sales', 0.0, netSales);
-          else if (netSales < 0) addLine('Sales', Math.abs(netSales), 0.0);
+          if (productSales > 0) addLine('Sales', 0.0, productSales);
+          else if (productSales < 0) addLine('Sales', Math.abs(productSales), 0.0);
 
-          if (fedTaxTotal > 0) addLine(fedAccount, 0.0, fedTaxTotal);
-          else if (fedTaxTotal < 0) addLine(fedAccount, Math.abs(fedTaxTotal), 0.0);
+          if (serviceSales > 0) addLine('Service Revenue', 0.0, serviceSales);
+          else if (serviceSales < 0) addLine('Service Revenue', Math.abs(serviceSales), 0.0);
 
-          if (provTaxTotal > 0) addLine(provAccount, 0.0, provTaxTotal);
-          else if (provTaxTotal < 0) addLine(provAccount, Math.abs(provTaxTotal), 0.0);
+          Object.entries(dynamicTaxMap).forEach(([accName, amt]) => {
+              if (amt > 0) addLine(accName, 0.0, amt);
+              else if (amt < 0) addLine(accName, Math.abs(amt), 0.0);
+          });
 
           if (shiftTips > 0) addLine('Tips Payable', 0.0, shiftTips);
           else if (shiftTips < 0) addLine('Tips Payable', Math.abs(shiftTips), 0.0);
@@ -604,14 +830,27 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
               addLine('Inventory Asset', Math.abs(totalCogs), 0.0);
           }
 
-          // Debits: Undeposited Funds - FIX TO USE sinceIso
-          let cashSalesQuery = supabase.from('sales').select('total').eq('company_id', companyId).gte('date', sinceIso).eq('method', 'Cash');
-          if (targetStoreId) cashSalesQuery = cashSalesQuery.eq('store_id', targetStoreId);
-          else cashSalesQuery = cashSalesQuery.is('store_id', null);
+          let cashSalesFromDB = 0.0;
 
-          const cashSalesRes = await fetchAll(cashSalesQuery);
-          const cashSalesFromDB = cashSalesRes.reduce((sum, s) => sum + parseMoney(s.total), 0);
-          
+          if (saleIds.length > 0) {
+            const chunkSize = 100;
+            let allCashPayments: any[] = [];
+
+            for (let i = 0; i < saleIds.length; i += chunkSize) {
+              const chunk = saleIds.slice(i, i + chunkSize);
+              const paymentsData = await fetchAll(
+                supabase
+                  .from("sale_payments")
+                  .select("method, amount")
+                  .in("sale_id", chunk)
+                  .eq("method", "Cash")
+              );
+              allCashPayments = allCashPayments.concat(paymentsData);
+            }
+
+            cashSalesFromDB = allCashPayments.reduce((sum, p) => sum + parseMoney(p.amount), 0);
+          }
+
           const actualCashFromSales = cashSalesFromDB + cashVariance;
           if (actualCashFromSales > 0) addLine('Undeposited Funds', actualCashFromSales, 0.0);
           else if (actualCashFromSales < 0) addLine('Undeposited Funds', 0.0, Math.abs(actualCashFromSales));
@@ -623,7 +862,6 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
              else if (actVal < 0) addLine(targetAcc, 0.0, Math.abs(actVal));
           });
 
-          // Variance
           if (totalVariance < 0) addLine('Cash Over/Short', Math.abs(totalVariance), 0.0);
           else if (totalVariance > 0) addLine('Cash Over/Short', 0.0, totalVariance);
 
@@ -636,8 +874,11 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
              if (jeUpdateError) throw new Error(`Failed to index Journal Totals: ${jeUpdateError.message}`);
           }
       }
+      // ==========================================
+      // END OF PHASE 4
+      // ==========================================
 
-      // Log Action
+      // Log Action (Always runs!)
       const actionType = sessionType === "Open" ? "Store Open" : "Store Close";
       let logDesc = `Cash Total: $${currentCashTotal.toFixed(2)}`;
       
@@ -652,7 +893,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
       await supabase.from("activity_log").insert([{
         id: getNextId(),
-        date: nowIso, // <--- THE FIX: Send the full UTC string
+        date: nowIso, 
         timestamp: nowTs,
         company_id: companyId,
         store_id: targetStoreId,
@@ -662,7 +903,6 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
         description: fullLogDesc,
       }]);
 
-      // --- INJECT LOCAL DISPLAY TIME INTO Z-REPORT ---
       let msg = `Till ${sessionType}ed successfully on ${localDisplayTime}.`;
       if (sessionType === "Close") {
          const stat = isBalanced ? "BALANCED" : (cashVariance > 0 ? "OVER" : "UNDER");
@@ -693,7 +933,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
     }
   };
 
-  const handlePrintZReport = () => {
+  const handlePrintZReport = () => {
     const printWindow = window.open("", "_blank", "width=600,height=800");
     if (!printWindow) {
       alert("Please allow pop-ups to print the Z-Report.");
@@ -759,7 +999,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
 
   const handleModalClose = () => {
     setShowSuccess(false);
-    loadSessionData(); // Flip Open/Close state
+    setActiveModule("Sell");
   };
   
 
@@ -852,7 +1092,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user }
                       onFocus={(e) => e.target.select()}
                       onChange={(e) => {
                          const val = e.target.value;
-                         if (val === "" || val === "." || /^\d*\.?\d*$/.test(val)) {
+                         if (val === "" || val === "." || val === "-" || val === "-." || /^-?\d*\.?\d*$/.test(val)) {
                             setNonCashInputs(prev => ({...prev, [method]: val}));
                          }
                       }}
