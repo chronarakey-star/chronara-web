@@ -15,22 +15,22 @@ interface SellModuleProps {
 }
 
 interface CartItem {
-  line_id: string;
-  id: string;
-  sku: string;
-  name: string;
-  price: number;
+  line_id: string;
+  id: string;
+  sku: string;
+  name: string;
+  price: number;
   cost: number; // <--- NEW: Track item cost for COGS
-  qty: number;
-  disc_type: "%" | "$" | null;
-  disc_val: number;
-  tax_code: string;
-  prov_tax_code: string;
-  item_commission?: number; 
-  is_tip?: boolean;
-  is_gift_card?: boolean;
-  card_number?: string;
-  ingredients?: any[];
+  qty: number;
+  disc_type: "%" | "$" | null;
+  disc_val: number;
+  tax_code: string;
+  prov_tax_code: string;
+  item_commission?: number; 
+  is_tip?: boolean;
+  is_gift_card?: boolean;
+  card_number?: string;
+  ingredients?: any[];
 }
 
 // --- TIMEZONE HELPER ---
@@ -106,15 +106,19 @@ const getFallbackTaxRates = (province?: string): Record<string, number> => {
 };
 
 const getItemSurcharge = (item: CartItem) => {
-    if (!item.ingredients) return 0;
-    return item.ingredients.reduce((sum, ing) => {
-        const diff = ing.current_qty - ing.base_qty;
-        return diff > 0 && ing.extra_cost > 0 ? sum + (diff * ing.extra_cost) : sum;
-    }, 0);
+    if (!item.ingredients) return 0;
+    return item.ingredients.reduce((sum, ing) => {
+        const diff = ing.current_qty - ing.base_qty;
+        return diff > 0 && ing.extra_cost > 0 ? sum + (diff * ing.extra_cost) : sum;
+    }, 0);
 };
 
 
-const printWebReceipt = (receiptData: any, configJson: any) => {
+const printWebReceipt = (
+    receiptData: any,
+    configJson: any,
+    shouldPrint: boolean = true
+) => {
     const defaultSettings = {
         font: "Times-Roman",
         paper_width: "80(mm)",
@@ -340,15 +344,62 @@ const printWebReceipt = (receiptData: any, configJson: any) => {
         </html>
     `;
 
-    const printWindow = window.open('', '_blank', 'width=400,height=600');
-    if (printWindow) {
-        printWindow.document.write(html);
-        printWindow.document.close();
-        printWindow.focus();
-        setTimeout(() => {
-            printWindow.print();
-            printWindow.close();
-        }, 500);
+    if (shouldPrint) {
+        const printWindow = window.open('', '_blank', 'width=400,height=600');
+
+        if (printWindow) {
+            printWindow.document.write(html);
+            printWindow.document.close();
+            printWindow.focus();
+
+            setTimeout(() => {
+                printWindow.print();
+                printWindow.close();
+            }, 500);
+        }
+    }
+
+    return html;
+};
+
+const sendReceiptEmail = async (
+    companyId: string,
+    recipientEmail: string,
+    receiptData: any,
+    rawConfig: any
+) => {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+
+    if (!accessToken) {
+        throw new Error("Your login session has expired. Please sign in again.");
+    }
+
+    const receiptHtml = printWebReceipt(
+        receiptData,
+        rawConfig,
+        false
+    );
+
+    const response = await fetch("/api/send-receipt", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+            companyId,
+            recipientEmail,
+            receiptHtml,
+            saleId: receiptData.sale_id,
+            companyName: receiptData.companyName
+        })
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+        throw new Error(result.error || "The receipt could not be emailed.");
     }
 };
 
@@ -371,13 +422,13 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   const [refundIngredientShrinkageIds, setRefundIngredientShrinkageIds] = useState<Set<string>>(new Set());
 
   // Settings State (Now wired to fetch from DB)
-  const [acceptTips, setAcceptTips] = useState(true); 
-  const [acceptGiftCards, setAcceptGiftCards] = useState(true);
+  const [acceptTips, setAcceptTips] = useState(true); 
+  const [acceptGiftCards, setAcceptGiftCards] = useState(true);
   const [autoDamagedRefunds, setAutoDamagedRefunds] = useState(false);
-  const [paymentMethods, setPaymentMethods] = useState<string[]>(["Cash", "Debit", "Visa", "Mastercard"]);
-  const [commGlobalEnabled, setCommGlobalEnabled] = useState(false); // <--- NEW
-  const [commGlobalRate, setCommGlobalRate] = useState(0); // <--- NEW
-  const [commItemEnabled, setCommItemEnabled] = useState(false); // <--- NEW
+  const [paymentMethods, setPaymentMethods] = useState<string[]>(["Cash", "Debit", "Visa", "Mastercard"]);
+  const [commGlobalEnabled, setCommGlobalEnabled] = useState(false); // <--- NEW
+  const [commGlobalRate, setCommGlobalRate] = useState(0); // <--- NEW
+  const [commItemEnabled, setCommItemEnabled] = useState(false); // <--- NEW
 
   // Customer State
   const [customers, setCustomers] = useState<any[]>([]);
@@ -436,6 +487,69 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       appDialog.resolve(isCancel ? null : (appDialog.type === 'prompt' ? appDialog.inputValue : null));
     }
     setAppDialog(prev => ({ ...prev, show: false, resolve: null }));
+  };
+
+  const handleEmailCompletedReceipt = async () => {
+    const receiptData = successData?.receiptData;
+
+    if (!receiptData) {
+      await customAlert(
+        "Receipt Error",
+        "The receipt information is not available."
+      );
+      return;
+    }
+
+    const defaultEmail =
+      customer?.email ||
+      "";
+
+    const recipient = await customPrompt(
+      "Email Receipt",
+      "Enter the email address that should receive this receipt."
+    );
+
+    if (recipient === null) {
+      return;
+    }
+
+    const recipientEmail = recipient.trim() || defaultEmail.trim();
+
+    if (
+      !recipientEmail ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)
+    ) {
+      await customAlert(
+        "Invalid Email",
+        "Please enter a valid email address."
+      );
+      return;
+    }
+
+    try {
+      await sendReceiptEmail(
+        companyId,
+        recipientEmail,
+        receiptData,
+        rawConfig
+      );
+
+      await customAlert(
+        "Receipt Sent",
+        `The receipt was emailed to ${recipientEmail}.`
+      );
+
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The receipt could not be emailed.";
+
+      await customAlert(
+        "Email Error",
+        message
+      );
+    }
   };
 
   // Daily Summary State
@@ -577,77 +691,87 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   // ==========================================
 
   // --- REFUND SESSION INITIALIZATION ---
-  useEffect(() => {
-    if (!refundData) return;
-    
-    const loadRefundSession = async () => {
-      setIsRefundMode(true);
-      
-      // 1. Fetch ONLY the IDs of previous refunds that branch from this sale
-      const { data: prevRefunds } = await supabase.from('sales').select('id').eq('is_refund_of', refundData.id).neq('is_deleted', true);
+  useEffect(() => {
+    if (!refundData) return;
+    
+    const loadRefundSession = async () => {
+      setIsRefundMode(true);
+      
+      // 1. Fetch ONLY the IDs of previous refunds that branch from this sale
+      const { data: prevRefunds } = await supabase
+        .from('sales')
+        .select('id')
+        .eq('company_id', companyId)
+        .eq('is_refund_of', refundData.id)
+        .neq('is_deleted', true);
 
-      // 2. Aggregate previously refunded item IDs AND Ingredients
-      let refundedIds: Record<string, number> = {};
-      let refundedIngs: Record<string, number> = {}; 
+      // 2. Aggregate previously refunded item IDs AND Ingredients
+      let refundedIds: Record<string, number> = {};
+      let refundedIngs: Record<string, number> = {}; 
 
-      if (prevRefunds && prevRefunds.length > 0) {
-        const prevIds = prevRefunds.map(r => r.id);
-        const { data: prevItems } = await supabase.from('sale_items').select('*').in('sale_id', prevIds).neq('is_deleted', true);
-        
-        prevItems?.forEach(pi => {
-          let is_pure_ing = false;
+      if (prevRefunds && prevRefunds.length > 0) {
+        const prevIds = prevRefunds.map(r => r.id);
+        const { data: prevItems } = await supabase
+          .from('sale_items')
+          .select('*')
+          .eq('company_id', companyId)
+          .in('sale_id', prevIds)
+          .neq('is_deleted', true);
+        
+        prevItems?.forEach(pi => {
+          let is_pure_ing = false;
 
-          if (pi.ingredients_snapshot) {
-              try {
-                  const snap = JSON.parse(pi.ingredients_snapshot);
-                  if (snap.is_pure_ing_refund) is_pure_ing = true;
-              } catch (e) {}
-          }
+          if (pi.ingredients_snapshot) {
+              try {
+                  const snap = JSON.parse(pi.ingredients_snapshot);
+                  if (snap.is_pure_ing_refund) is_pure_ing = true;
+              } catch (e) {}
+          }
 
-          let r_qty_raw = parseFloat(pi.qty || 0);
+          let r_qty_raw = parseFloat(pi.qty || 0);
 
-          if (r_qty_raw > 0.001 && !is_pure_ing) {
-              return;
-          }
+          if (r_qty_raw > 0.001 && !is_pure_ing) {
+              return;
+          }
 
-          let r_qty = Math.abs(r_qty_raw);
-          const r_price = Math.abs(pi.price || 0);
-          const pid = pi.product_id || pi.sku;
+          let r_qty = Math.abs(r_qty_raw);
+          const r_price = Math.abs(pi.price || 0);
+          const pid = pi.product_id || pi.sku;
 
-          if (pi.ingredients_snapshot) {
-              try {
-                  const snap = JSON.parse(pi.ingredients_snapshot);
-                  snap.ingredients?.forEach((ing: any) => {
-                      const c_sku = ing.sku || ing.child_sku;
-                      if (c_sku) {
-                          const i_qty = Math.abs(r_qty * (parseFloat(ing.current_qty) || 0));
-                          if (i_qty > 0) {
-                              const key = `${pid}||${c_sku}`;
-                              refundedIngs[key] = (refundedIngs[key] || 0) + i_qty;
-                          }
-                      }
-                  });
-              } catch (e) {}
-          }
+          if (pi.ingredients_snapshot) {
+              try {
+                  const snap = JSON.parse(pi.ingredients_snapshot);
+                  snap.ingredients?.forEach((ing: any) => {
+                      const c_sku = ing.sku || ing.child_sku;
+                      if (c_sku) {
+                          const i_qty = Math.abs(r_qty * (parseFloat(ing.current_qty) || 0));
+                          if (i_qty > 0) {
+                              const key = `${pid}||${c_sku}`;
+                              refundedIngs[key] = (refundedIngs[key] || 0) + i_qty;
+                          }
+                      }
+                  });
+              } catch (e) {}
+          }
 
-          if (is_pure_ing || (r_price < 0.001 && pi.ingredients_snapshot)) {
-              r_qty = 0;
-          }
+          if (is_pure_ing || (r_price < 0.001 && pi.ingredients_snapshot)) {
+              r_qty = 0;
+          }
 
-          if (pid) refundedIds[pid] = (refundedIds[pid] || 0) + r_qty;
-        });
-      }
+          if (pid) refundedIds[pid] = (refundedIds[pid] || 0) + r_qty;
+        });
+      }
 
-      // 3. Fetch product configurations directly from the DB (WITH COST)
-      const validProductIds = refundData.items.map((i: any) => i.product_id).filter(Boolean);
-      let refundDbProducts: any[] = [];
-      if (validProductIds.length > 0) {
+      // 3. Fetch product configurations directly from the DB (WITH COST)
+      const validProductIds = refundData.items.map((i: any) => i.product_id).filter(Boolean);
+      let refundDbProducts: any[] = [];
+      if (validProductIds.length > 0) {
           // --- THE FIX: Select `unit_cost` from products ---
-          const { data: pData } = await supabase.from('products').select('id, sku, tax_code, prov_tax_code, item_commission, unit_cost').in('id', validProductIds);
-          if (pData) refundDbProducts = pData;
-      }
+          const { data: pData } = await supabase.from('products').select('id, sku, tax_code, prov_tax_code, item_commission, unit_cost').in('id', validProductIds);
+          if (pData) refundDbProducts = pData;
+      }
 
-      // 4. Build the cart delta
+      // 4. Build the cart delta
       const initialCart: CartItem[] = [];
       const originalItems: any[] = [];
       
@@ -783,15 +907,15 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   }, [refundData, autoDamagedRefunds, storeProvince]);
 
   // Click outside listener for Customer Dropdown
-  useEffect(() => {
-    function handleClickOutside(event: MouseEvent) {
-      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
-        setShowCustomerDropdown(false);
-      }
-    }
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (customerDropdownRef.current && !customerDropdownRef.current.contains(event.target as Node)) {
+        setShowCustomerDropdown(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
   // Fetch global settings from DB
   const fetchCompanySettings = async () => {
     if (!companyId) return;
@@ -862,58 +986,58 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   // --- BULLETPROOF TIP INJECTOR ---
-  useEffect(() => {
-    if (isRefundMode) return; // Lock tips in refund mode
+  useEffect(() => {
+    if (isRefundMode) return; // Lock tips in refund mode
 
-    setCart(prevCart => {
-      const hasTip = prevCart.some(i => i.is_tip || i.sku === 'SYS_TIP');
-      
-      if (!acceptTips) {
-        return hasTip ? prevCart.filter(i => !i.is_tip && i.sku !== 'SYS_TIP') : prevCart;
-      }
-      
-      if (!hasTip) {
-        return [...prevCart, {
-          line_id: `SYS_TIP_${crypto.randomUUID().substring(0, 8)}`,
-          id: 'SYS_TIP',
-          sku: 'SYS_TIP',
-          name: 'Tips',
-          price: 0,
+    setCart(prevCart => {
+      const hasTip = prevCart.some(i => i.is_tip || i.sku === 'SYS_TIP');
+      
+      if (!acceptTips) {
+        return hasTip ? prevCart.filter(i => !i.is_tip && i.sku !== 'SYS_TIP') : prevCart;
+      }
+      
+      if (!hasTip) {
+        return [...prevCart, {
+          line_id: `SYS_TIP_${crypto.randomUUID().substring(0, 8)}`,
+          id: 'SYS_TIP',
+          sku: 'SYS_TIP',
+          name: 'Tips',
+          price: 0,
           cost: 0, // <--- THE FIX
-          qty: 1,
-          disc_type: null,
-          disc_val: 0,
-          tax_code: 'Exempt',
-          prov_tax_code: 'Exempt',
-          is_tip: true
-        }];
-      }
-      return prevCart;
-    });
-  }, [acceptTips, cart.length, isRefundMode]); 
+          qty: 1,
+          disc_type: null,
+          disc_val: 0,
+          tax_code: 'Exempt',
+          prov_tax_code: 'Exempt',
+          is_tip: true
+        }];
+      }
+      return prevCart;
+    });
+  }, [acceptTips, cart.length, isRefundMode]); 
 
-  const fetchProducts = async (query = searchQuery) => {
-    if (!companyId) return;
+  const fetchProducts = async (query = searchQuery) => {
+    if (!companyId) return;
 
-    try {
-      let q = supabase.from('products').select('*').eq('company_id', companyId).neq('is_deleted', true);
-      
-      if (storeId && storeId !== "ALL_STORES") q = q.eq('store_id', storeId);
-      if (selectedCategories.length > 0) q = q.in('category', selectedCategories);
-      if (query) q = q.or(`name.ilike.%${query}%,sku.ilike.%${query}%`);
-      
-      const { data } = await q.limit(50);
-      if (data) {
-        setProducts(data);
-        if (categories.length === 0 && !query) {
-          const uniqueCats = Array.from(new Set(data.map(p => p.category).filter(c => c && c.trim() !== "")));
-          setCategories(uniqueCats.sort());
-        }
-      }
-    } catch (err) {
-      console.error("Failed to fetch products", err);
-    }
-  };
+    try {
+      let q = supabase.from('products').select('*').eq('company_id', companyId).neq('is_deleted', true);
+      
+      if (storeId && storeId !== "ALL_STORES") q = q.eq('store_id', storeId);
+      if (selectedCategories.length > 0) q = q.in('category', selectedCategories);
+      if (query) q = q.or(`name.ilike.%${query}%,sku.ilike.%${query}%`);
+      
+      const { data } = await q.limit(50);
+      if (data) {
+        setProducts(data);
+        if (categories.length === 0 && !query) {
+          const uniqueCats = Array.from(new Set(data.map(p => p.category).filter(c => c && c.trim() !== "")));
+          setCategories(uniqueCats.sort());
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch products", err);
+    }
+  };
 
   const fetchCustomers = async () => {
     if (!companyId) return;
@@ -1209,150 +1333,150 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const addToCart = async (product: any) => {
-    console.log("🛒 ADDING PRODUCT:", product); // DEBUG LOG
+    console.log("🛒 ADDING PRODUCT:", product); // DEBUG LOG
 
-    // Optimistically update or clone if it already exists to keep UI snappy
-    const existingInCart = cart.find(i => i.id === product.id);
-    if (existingInCart) {
-      if (existingInCart.ingredients && existingInCart.ingredients.length > 0) {
-        const newCartItem = {
-          ...existingInCart,
-          line_id: crypto.randomUUID(),
-          qty: 1,
-          ingredients: existingInCart.ingredients.map(ing => ({...ing, current_qty: ing.base_qty}))
-        };
-        setCart(prev => [...prev, newCartItem]);
-        return;
-      } else {
-        setCart(prev => prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i));
-        return;
-      }
-    }
+    // Optimistically update or clone if it already exists to keep UI snappy
+    const existingInCart = cart.find(i => i.id === product.id);
+    if (existingInCart) {
+      if (existingInCart.ingredients && existingInCart.ingredients.length > 0) {
+        const newCartItem = {
+          ...existingInCart,
+          line_id: crypto.randomUUID(),
+          qty: 1,
+          ingredients: existingInCart.ingredients.map(ing => ({...ing, current_qty: ing.base_qty}))
+        };
+        setCart(prev => [...prev, newCartItem]);
+        return;
+      } else {
+        setCart(prev => prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i));
+        return;
+      }
+    }
 
-    let ingredients: any[] = [];
-    
-    if (product.sku) {
-        try {
-          const { data: ingData, error: ingError } = await supabase
-            .from('product_ingredients')
-            .select('*')
-            .eq('company_id', companyId)
-            .eq('parent_sku', product.sku);
+    let ingredients: any[] = [];
+    
+    if (product.sku) {
+        try {
+          const { data: ingData, error: ingError } = await supabase
+            .from('product_ingredients')
+            .select('*')
+            .eq('company_id', companyId)
+            .eq('parent_sku', product.sku);
 
-          if (ingError) {
-              console.error("❌ SUPABASE INGREDIENT ERROR:", ingError);
-              alert(`Database Error fetching ingredients: ${ingError.message}\n\n(Check if 'product_ingredients' table exists in Supabase and RLS is disabled)`);
-          }
+          if (ingError) {
+              console.error("❌ SUPABASE INGREDIENT ERROR:", ingError);
+              alert(`Database Error fetching ingredients: ${ingError.message}\n\n(Check if 'product_ingredients' table exists in Supabase and RLS is disabled)`);
+          }
 
-          console.log("📦 RAW INGREDIENT DATA FROM SUPABASE:", ingData); // DEBUG LOG
+          console.log("📦 RAW INGREDIENT DATA FROM SUPABASE:", ingData); // DEBUG LOG
 
-          if (ingData && ingData.length > 0) {
-            const childSkus = ingData.map((i: any) => i.child_sku);
-            const { data: prodData, error: prodError } = await supabase
-              .from('products')
-              .select('sku, name')
-              .eq('company_id', companyId)
-              .in('sku', childSkus);
-              
-            if (prodError) console.error("❌ SUPABASE PRODUCT LOOKUP ERROR:", prodError);
+          if (ingData && ingData.length > 0) {
+            const childSkus = ingData.map((i: any) => i.child_sku);
+            const { data: prodData, error: prodError } = await supabase
+              .from('products')
+              .select('sku, name')
+              .eq('company_id', companyId)
+              .in('sku', childSkus);
+              
+            if (prodError) console.error("❌ SUPABASE PRODUCT LOOKUP ERROR:", prodError);
 
-            ingredients = ingData.map((i: any) => {
-               const p = prodData?.find((pd: any) => pd.sku === i.child_sku);
-               return {
-                  sku: i.child_sku,
-                  name: p?.name || i.child_sku,
-                  base_qty: parseFloat(i.qty_needed) || 0,
-                  current_qty: parseFloat(i.qty_needed) || 0,
-                  extra_cost: parseFloat(i.extra_cost) || 0
-               };
-            });
-          } else {
-             console.warn(`⚠️ Supabase returned 0 ingredients for SKU: ${product.sku}. If this is a packaged item, your Python sync_worker isn't pushing ingredients to the cloud!`);
-          }
-        } catch (err) {
-          console.error("Failed to fetch ingredients", err);
-        }
-    } else {
-        console.warn("⚠️ Product has no SKU, cannot fetch ingredients!");
-    }
+            ingredients = ingData.map((i: any) => {
+               const p = prodData?.find((pd: any) => pd.sku === i.child_sku);
+               return {
+                  sku: i.child_sku,
+                  name: p?.name || i.child_sku,
+                  base_qty: parseFloat(i.qty_needed) || 0,
+                  current_qty: parseFloat(i.qty_needed) || 0,
+                  extra_cost: parseFloat(i.extra_cost) || 0
+               };
+            });
+          } else {
+             console.warn(`⚠️ Supabase returned 0 ingredients for SKU: ${product.sku}. If this is a packaged item, your Python sync_worker isn't pushing ingredients to the cloud!`);
+          }
+        } catch (err) {
+          console.error("Failed to fetch ingredients", err);
+        }
+    } else {
+        console.warn("⚠️ Product has no SKU, cannot fetch ingredients!");
+    }
 
-        const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
+        const defaultTaxCodes = getDefaultTaxCodes(storeProvince);
 
     setCart(prev => {
-      const existingNow = prev.find(i => i.id === product.id);
-      if (existingNow) {
-          if (ingredients.length > 0) {
-              return [...prev, {
-                line_id: crypto.randomUUID(),
-                id: product.id,
-                sku: product.sku,
-                name: product.name,
-                price: parseFloat(product.price) || 0,
+      const existingNow = prev.find(i => i.id === product.id);
+      if (existingNow) {
+          if (ingredients.length > 0) {
+              return [...prev, {
+                line_id: crypto.randomUUID(),
+                id: product.id,
+                sku: product.sku,
+                name: product.name,
+                price: parseFloat(product.price) || 0,
                 // --- THE FIX: Look for unit_cost ---
-                cost: parseFloat(product.unit_cost) || 0.0, 
-                qty: 1,
-                disc_type: null,
-                disc_val: 0,
+                cost: parseFloat(product.unit_cost) || 0.0, 
+                qty: 1,
+                disc_type: null,
+                disc_val: 0,
                 tax_code: product.tax_code || defaultTaxCodes.fed,
                 prov_tax_code: product.prov_tax_code || defaultTaxCodes.prov,
-                item_commission: parseFloat(product.item_commission || 0), 
-                ingredients: ingredients
-              }];
-          } else {
-              return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
-          }
-      }
-      return [...prev, {
-        line_id: crypto.randomUUID(),
-        id: product.id,
-        sku: product.sku,
-        name: product.name,
-        price: parseFloat(product.price) || 0,
+                item_commission: parseFloat(product.item_commission || 0), 
+                ingredients: ingredients
+              }];
+          } else {
+              return prev.map(i => i.id === product.id ? { ...i, qty: i.qty + 1 } : i);
+          }
+      }
+      return [...prev, {
+        line_id: crypto.randomUUID(),
+        id: product.id,
+        sku: product.sku,
+        name: product.name,
+        price: parseFloat(product.price) || 0,
         // --- THE FIX: Look for unit_cost ---
-        cost: parseFloat(product.unit_cost) || 0.0, 
-        qty: 1,
-        disc_type: null,
-        disc_val: 0,
+        cost: parseFloat(product.unit_cost) || 0.0, 
+        qty: 1,
+        disc_type: null,
+        disc_val: 0,
         tax_code: product.tax_code || defaultTaxCodes.fed,
         prov_tax_code: product.prov_tax_code || defaultTaxCodes.prov,
-        item_commission: parseFloat(product.item_commission || 0), 
-        ingredients: ingredients
-      }];
-    });
-  };
+        item_commission: parseFloat(product.item_commission || 0), 
+        ingredients: ingredients
+      }];
+    });
+  };
 
-  const updateIngredientQty = (line_id: string, sku: string, delta: number) => {
-      setCart(prevCart => prevCart.map(item => {
-          if (item.line_id !== line_id) return item;
-          if (!item.ingredients) return item;
+  const updateIngredientQty = (line_id: string, sku: string, delta: number) => {
+      setCart(prevCart => prevCart.map(item => {
+          if (item.line_id !== line_id) return item;
+          if (!item.ingredients) return item;
 
-          const newIngredients = item.ingredients.map(ing => {
-              if (ing.sku !== sku) return ing;
-              const newQty = Math.max(0, ing.current_qty + delta);
-              return { ...ing, current_qty: newQty };
-          });
+          const newIngredients = item.ingredients.map(ing => {
+              if (ing.sku !== sku) return ing;
+              const newQty = Math.max(0, ing.current_qty + delta);
+              return { ...ing, current_qty: newQty };
+          });
 
-          return { ...item, ingredients: newIngredients };
-      }));
-  };
+          return { ...item, ingredients: newIngredients };
+      }));
+  };
 
-  const addGiftCardItem = () => {
-    setCart(prev => [...prev, {
-      line_id: crypto.randomUUID(),
-      id: 'SYS_GIFT_CARD',
-      sku: 'SYS_GIFT_CARD',
-      name: 'Gift Card Load',
-      price: 0,
+  const addGiftCardItem = () => {
+    setCart(prev => [...prev, {
+      line_id: crypto.randomUUID(),
+      id: 'SYS_GIFT_CARD',
+      sku: 'SYS_GIFT_CARD',
+      name: 'Gift Card Load',
+      price: 0,
       cost: 0, // <--- THE FIX
-      qty: 1,
-      disc_type: null,
-      disc_val: 0,
-      tax_code: 'Exempt',
-      prov_tax_code: 'Exempt',
-      is_gift_card: true,
-      card_number: ""
-    }]);
-  };
+      qty: 1,
+      disc_type: null,
+      disc_val: 0,
+      tax_code: 'Exempt',
+      prov_tax_code: 'Exempt',
+      is_gift_card: true,
+      card_number: ""
+    }]);
+  };
 
   const updateQty = (line_id: string, valStr: string) => {
     const newQty = parseFloat(valStr);
@@ -1749,7 +1873,7 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   // --- PAYMENT HANDLERS ---
-  const saveTransactionToDatabase = async (finalPaymentQueue: any[], changeDue: number = 0) => {
+  const saveTransactionToDatabase = async (finalPaymentQueue: any[], changeDue: number = 0) => {
     try {
       // =======================================================
       // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
@@ -2162,6 +2286,10 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
           return {
               id: syncBaseId++, // <--- THE FIX
               sale_id: saleId,
+              company_id: companyId,
+              created_at: timestampStr,
+              updated_at: timestampStr,
+              is_deleted: false,
               product_id: (item.sku === 'SYS_TIP' || item.sku === 'SYS_GIFT_CARD' || item.is_tip || item.is_gift_card) ? null : (item.id || null),
               sku: item.sku || "",
               name: item.name,
@@ -2189,6 +2317,10 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       const salePaymentsRecords = finalPaymentQueue.map(p => ({
         id: syncBaseId++, // <--- THE FIX
         sale_id: saleId,
+        company_id: companyId,
+        created_at: timestampStr,
+        updated_at: timestampStr,
+        is_deleted: false,
         method: p.method,
         amount: p.amount,
         payment_ref: p.card_number || ""
@@ -2545,91 +2677,91 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const processPayment = async (method: string) => {
-    let cardNum: string | null | undefined = undefined;
-    let availableGcBalance: number | null = null;
-    
-    if (method === "Gift Card") {
-      cardNum = await customPrompt("Gift Card Payment", "Swipe or Enter Gift Card Number:");
-      
-      if (!cardNum || !cardNum.trim()) return; 
-      cardNum = cardNum.trim();
+    let cardNum: string | null | undefined = undefined;
+    let availableGcBalance: number | null = null;
+    
+    if (method === "Gift Card") {
+      cardNum = await customPrompt("Gift Card Payment", "Swipe or Enter Gift Card Number:");
+      
+      if (!cardNum || !cardNum.trim()) return; 
+      cardNum = cardNum.trim();
 
-      try {
-          const { data: gc, error } = await supabase
-              .from('gift_cards')
-              .select('current_balance, status')
-              .eq('company_id', companyId)
-              .eq('card_number', cardNum)
-              .maybeSingle();
+      try {
+          const { data: gc, error } = await supabase
+              .from('gift_cards')
+              .select('current_balance, status')
+              .eq('company_id', companyId)
+              .eq('card_number', cardNum)
+              .maybeSingle();
 
-          if (error) throw error;
+          if (error) throw error;
 
-          if (!gc) {
-              await customAlert("Card Not Found", `Gift Card '${cardNum}' could not be found in the system.`);
-              return;
-          }
+          if (!gc) {
+              await customAlert("Card Not Found", `Gift Card '${cardNum}' could not be found in the system.`);
+              return;
+          }
 
-          if (gc.status === 'Inactive' || gc.status === 'Void') {
-              await customAlert("Invalid Status", `Gift Card '${cardNum}' is currently marked as ${gc.status}.`);
-              return;
-          }
+          if (gc.status === 'Inactive' || gc.status === 'Void') {
+              await customAlert("Invalid Status", `Gift Card '${cardNum}' is currently marked as ${gc.status}.`);
+              return;
+          }
 
-          availableGcBalance = parseFloat(gc.current_balance || "0");
-          
-          if (availableGcBalance <= 0 && !isRefundMode) {
-              await customAlert("Empty Balance", `Gift Card '${cardNum}' has a $0.00 balance.`);
-              return;
-          }
-      } catch (err) {
-          console.error("Error verifying gift card:", err);
-          await customAlert("Network Error", "Failed to verify gift card with the server. Please check your connection.");
-          return;
-      }
-    }
+          availableGcBalance = parseFloat(gc.current_balance || "0");
+          
+          if (availableGcBalance <= 0 && !isRefundMode) {
+              await customAlert("Empty Balance", `Gift Card '${cardNum}' has a $0.00 balance.`);
+              return;
+          }
+      } catch (err) {
+          console.error("Error verifying gift card:", err);
+          await customAlert("Network Error", "Failed to verify gift card with the server. Please check your connection.");
+          return;
+      }
+    }
 
-    const currentTotalVal = isRefundMode ? totals.total - originalSaleTotal : totals.total;
-    const currentRemaining = currentTotalVal - paymentQueue.reduce((a, b) => a + b.amount, 0);
-    
-    if (Math.abs(currentRemaining) <= 0.001) return;
+    const currentTotalVal = isRefundMode ? totals.total - originalSaleTotal : totals.total;
+    const currentRemaining = currentTotalVal - paymentQueue.reduce((a, b) => a + b.amount, 0);
+    
+    if (Math.abs(currentRemaining) <= 0.001) return;
 
-    let amountToPay = parseFloat(splitAmount);
-    if (isNaN(amountToPay)) amountToPay = currentRemaining;
+    let amountToPay = parseFloat(splitAmount);
+    if (isNaN(amountToPay)) amountToPay = currentRemaining;
 
-    const payAmountSigned = currentRemaining >= 0 ? Math.abs(amountToPay) : -Math.abs(amountToPay);
+    const payAmountSigned = currentRemaining >= 0 ? Math.abs(amountToPay) : -Math.abs(amountToPay);
 
-    let actualCharge = payAmountSigned;
-    let changeDue = 0;
+    let actualCharge = payAmountSigned;
+    let changeDue = 0;
 
-    if (Math.abs(payAmountSigned) > Math.abs(currentRemaining) + 0.001) {
-      if (method === "Cash") {
-        changeDue = Math.abs(payAmountSigned) - Math.abs(currentRemaining);
-        actualCharge = currentRemaining;
-      } else {
-        actualCharge = currentRemaining;
-      }
-    }
+    if (Math.abs(payAmountSigned) > Math.abs(currentRemaining) + 0.001) {
+      if (method === "Cash") {
+        changeDue = Math.abs(payAmountSigned) - Math.abs(currentRemaining);
+        actualCharge = currentRemaining;
+      } else {
+        actualCharge = currentRemaining;
+      }
+    }
 
-    if (method === "Gift Card" && availableGcBalance !== null && !isRefundMode) {
-        if (actualCharge > availableGcBalance) {
-            actualCharge = availableGcBalance;
-            await customAlert("Partial Payment Applied", `Gift Card only has $${availableGcBalance.toFixed(2)} available. Applying partial payment to the bill.`);
-        }
-    }
+    if (method === "Gift Card" && availableGcBalance !== null && !isRefundMode) {
+        if (actualCharge > availableGcBalance) {
+            actualCharge = availableGcBalance;
+            await customAlert("Partial Payment Applied", `Gift Card only has $${availableGcBalance.toFixed(2)} available. Applying partial payment to the bill.`);
+        }
+    }
 
-    const newQueue = [...paymentQueue, { method, amount: actualCharge, card_number: cardNum }];
-    setPaymentQueue(newQueue);
+    const newQueue = [...paymentQueue, { method, amount: actualCharge, card_number: cardNum }];
+    setPaymentQueue(newQueue);
 
-    const newRemaining = currentTotalVal - newQueue.reduce((a, b) => a + b.amount, 0);
-    
-    if (Math.abs(newRemaining) <= 0.01) {
-      const success = await saveTransactionToDatabase(newQueue, changeDue);
-      if (!success) {
-         setPaymentQueue(paymentQueue);
-      }
-    } else {
-      setSplitAmount(Math.abs(newRemaining).toFixed(2));
-    }
-  };
+    const newRemaining = currentTotalVal - newQueue.reduce((a, b) => a + b.amount, 0);
+    
+    if (Math.abs(newRemaining) <= 0.01) {
+      const success = await saveTransactionToDatabase(newQueue, changeDue);
+      if (!success) {
+         setPaymentQueue(paymentQueue);
+      }
+    } else {
+      setSplitAmount(Math.abs(newRemaining).toFixed(2));
+    }
+  };
 
   // --- UI RENDER ---
   if (isStoreOpen === false) {
@@ -3542,9 +3674,16 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
                       printWebReceipt((successData as any).receiptData, rawConfig);
                   }}
                   style={{ borderColor: themeColor, color: themeColor }}
-                  className="w-full py-4 rounded font-bold text-[14px] bg-transparent border-2 transition-transform active:scale-95 tracking-wider uppercase hover:bg-[#2a2a2a]"
+                  className="w-full py-4 rounded font-bold text-[14px] bg-transparent border-2 transition-transform active:scale-95 tracking-wider uppercase hover:bg-[#2a2a2a] mb-3"
                 >
                   PRINT RECEIPT
+                </button>
+
+                <button
+                  onClick={handleEmailCompletedReceipt}
+                  className="w-full py-4 rounded font-bold text-[14px] bg-transparent border-2 border-[#3B8ED0] text-[#3B8ED0] transition-transform active:scale-95 tracking-wider uppercase hover:bg-[#23364A]"
+                >
+                  EMAIL RECEIPT
                 </button>
 
              </div>

@@ -433,7 +433,12 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
         const payment_methods: Record<string, number> = {};
 
         if (saleIds.length > 0) {
-            const { data: itemData } = await supabase.from('sale_items').select('name, price, qty, sku').in('sale_id', saleIds);
+            const { data: itemData } = await supabase
+              .from('sale_items')
+              .select('name, price, qty, sku')
+              .eq('company_id', companyId)
+              .in('sale_id', saleIds)
+              .neq('is_deleted', true);
             itemData?.forEach(item => {
                const qty = parseFloat(item.qty || 0);
                const val = parseFloat(item.price || 0) * (qty !== 0 ? qty : 1);
@@ -443,7 +448,12 @@ export default function DashboardModule({ companyId, storeId, themeColor, user }
                category_sales["Standard"] = (category_sales["Standard"] || 0) + val;
             });
 
-            const { data: payData } = await supabase.from('sale_payments').select('method, amount').in('sale_id', saleIds);
+            const { data: payData } = await supabase
+              .from('sale_payments')
+              .select('method, amount')
+              .eq('company_id', companyId)
+              .in('sale_id', saleIds)
+              .neq('is_deleted', true);
             payData?.forEach(p => {
                const amt = parseFloat(p.amount || 0);
                if (amt > 0) payment_methods[p.method] = (payment_methods[p.method] || 0) + amt;

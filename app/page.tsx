@@ -76,7 +76,7 @@ export default function LoginPage() {
           <button
             type="submit"
             disabled={loading}
-            className="mt-6 w-full rounded-md bg-[#00A023] p-3 font-bold text-white hover:bg-[#00671A] disabled:opacity-50 transition-colors"
+            className="mt-6 w-full rounded-md bg-[#189777] p-3 font-bold text-white hover:brightness-110 disabled:opacity-50 transition-all"
           >
             {loading ? "Verifying..." : "SIGN IN"}
           </button>

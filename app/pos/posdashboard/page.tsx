@@ -35,7 +35,7 @@ export default function POSDashboard() {
   
   const [isReady, setIsReady] = useState(false);
 
-  const [themeColor, setThemeColor] = useState("#00A023");
+  const [themeColor, setThemeColor] = useState("#189777");
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [storeId, setStoreId] = useState<string>("");
@@ -54,53 +54,206 @@ export default function POSDashboard() {
   // ============================================================================
   useEffect(() => {
     const initializeDashboard = async () => {
-      const cachedColor = localStorage.getItem('chronara_theme_color');
-      if (cachedColor) setThemeColor(cachedColor);
+      const clearCachedPOSSession = () => {
+        localStorage.removeItem('chronara_web_user');
+        localStorage.removeItem('chronara_last_store');
+        localStorage.removeItem('chronara_theme_color');
+      };
 
-      const cachedStore = localStorage.getItem('chronara_last_store') || "";
-      if (cachedStore) setStoreId(cachedStore);
+      const cachedStore =
+        localStorage.getItem('chronara_last_store') || "";
 
-      const cachedUserStr = localStorage.getItem('chronara_web_user');
+      const cachedUserStr =
+        localStorage.getItem('chronara_web_user');
+
       if (!cachedUserStr) {
         router.push("/pos");
         return;
       }
 
-      const user: User = JSON.parse(cachedUserStr);
-      setCurrentUser(user);
+      let cachedUser: User;
 
-      const { data: { session } } = await supabase.auth.getSession();
+      try {
+        cachedUser = JSON.parse(cachedUserStr);
+      } catch {
+        clearCachedPOSSession();
+        router.push("/pos");
+        return;
+      }
+
+      const {
+        data: { session }
+      } = await supabase.auth.getSession();
+
       if (!session) {
+        clearCachedPOSSession();
         router.push("/pos");
         return;
       }
 
       try {
-        const { data: companies } = await supabase
-          .from('companies')
-          .select('id')
-          .or(`email.eq.${session.user.email},owner_email.eq.${session.user.email}`)
-          .limit(1);
+        const { data: companies, error: companyError } =
+          await supabase
+            .from('companies')
+            .select('id, config_json')
+            .or(
+              `email.eq.${session.user.email},owner_email.eq.${session.user.email}`
+            )
+            .limit(1);
 
-        if (companies && companies.length > 0) {
-          setCompanyId(companies[0].id); 
+        if (companyError) {
+          throw companyError;
         }
 
-        const { data: empData } = await supabase
-          .from('employees')
-          .select('id, first_name, last_name, company_id, store_id') 
-          .eq('user_id', user.id);
+        if (!companies || companies.length === 0) {
+          clearCachedPOSSession();
+          router.push("/pos");
+          return;
+        }
+
+        const company = companies[0];
+
+        setCompanyId(company.id);
+
+        let companyConfig: Record<string, any> = {};
+
+        if (company.config_json) {
+          try {
+            companyConfig =
+              typeof company.config_json === 'string'
+                ? JSON.parse(company.config_json)
+                : company.config_json;
+          } catch (configError) {
+            console.error(
+              "Could not parse company theme configuration:",
+              configError
+            );
+          }
+        }
+
+        const cloudThemeColor =
+          typeof companyConfig.color_theme === 'string'
+          && /^#[0-9A-Fa-f]{6}$/.test(
+            companyConfig.color_theme
+          )
+            ? companyConfig.color_theme
+            : "#189777";
+
+        setThemeColor(cloudThemeColor);
+
+        localStorage.setItem(
+          'chronara_theme_color',
+          cloudThemeColor
+        );
+
+        const { data: verifiedUser, error: userError } =
+          await supabase
+            .from('users')
+            .select('id, username')
+            .eq('id', cachedUser.id)
+            .eq('company_id', company.id)
+            .eq('is_active', 1)
+            .maybeSingle();
+
+        if (userError) {
+          throw userError;
+        }
+
+        if (!verifiedUser) {
+          clearCachedPOSSession();
+          router.push("/pos");
+          return;
+        }
+
+        const currentVerifiedUser: User = {
+          id: verifiedUser.id,
+          username: verifiedUser.username
+        };
+
+        setCurrentUser(currentVerifiedUser);
+
+        localStorage.setItem(
+          'chronara_web_user',
+          JSON.stringify(currentVerifiedUser)
+        );
+
+        const { data: activeStores, error: storesError } =
+          await supabase
+            .from('stores')
+            .select('id')
+            .eq('company_id', company.id)
+            .eq('is_active', 1);
+
+        if (storesError) {
+          throw storesError;
+        }
+
+        let validStoreId = "";
+
+        if (
+          cachedStore
+          && activeStores?.some(
+            store => store.id === cachedStore
+          )
+        ) {
+          validStoreId = cachedStore;
+        } else if (
+          activeStores
+          && activeStores.length > 0
+        ) {
+          validStoreId = activeStores[0].id;
+        }
+
+        setStoreId(validStoreId);
+
+        if (validStoreId) {
+          localStorage.setItem(
+            'chronara_last_store',
+            validStoreId
+          );
+        } else {
+          localStorage.removeItem(
+            'chronara_last_store'
+          );
+        }
+
+        const { data: empData, error: employeeError } =
+          await supabase
+            .from('employees')
+            .select(
+              'id, first_name, last_name, company_id, store_id'
+            )
+            .eq('company_id', company.id)
+            .eq('user_id', verifiedUser.id);
+
+        if (employeeError) {
+          throw employeeError;
+        }
 
         if (empData && empData.length > 0) {
-          const targetEmp = empData.find((e: Employee) => e.store_id === cachedStore) || empData[0];
+          const targetEmp =
+            empData.find(
+              (employee: Employee) =>
+                validStoreId
+                && employee.store_id === validStoreId
+            ) || empData[0];
+
           setEmployee(targetEmp);
+        } else {
+          setEmployee(null);
         }
 
-      } catch (err) {
-        console.error("Error fetching context:", err);
-      }
+        setIsReady(true);
 
-      setIsReady(true);
+      } catch (err) {
+        console.error(
+          "Error fetching POS context:",
+          err
+        );
+
+        clearCachedPOSSession();
+        router.push("/pos");
+      }
     };
 
     initializeDashboard();

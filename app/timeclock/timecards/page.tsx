@@ -138,7 +138,7 @@ export default function MyTimecards() {
   const router = useRouter();
   
   const [isReady, setIsReady] = useState(false);
-  const [themeColor, setThemeColor] = useState("#00A023");
+  const [themeColor, setThemeColor] = useState("#189777");
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [companyId, setCompanyId] = useState<string>(""); 
@@ -173,11 +173,16 @@ export default function MyTimecards() {
   const fetchTimecards = async (empId: string, compId: string, currentStores: Store[] = stores) => {
     try {
       // 1. Base Query for Punches
-      let query = supabase.from('time_punches')
+      let query = supabase
+        .from('time_punches')
         .select('*')
         .eq('company_id', compId)
         .eq('employee_id', empId)
-        .order('clock_in', { ascending: false });
+        
+        .order(
+          'clock_in',
+          { ascending: false }
+        );
 
       if (filterStore !== "All Stores") {
         const targetStore = currentStores.find(s => s.name === filterStore);
@@ -198,7 +203,19 @@ export default function MyTimecards() {
       // 2. Fetch dependencies
       const { data: settingsData } = await supabase.from('store_time_clock_settings').select('store_id, min_reporting_pay, min_reporting_hours, round_time_punches, rounding_increment_mins').eq('company_id', compId);
       const { data: schedulesData } = await supabase.from('schedules').select('employee_id, date').eq('company_id', compId);
-      const { data: breaksData } = await supabase.from('time_punch_breaks').select('*').in('punch_id', punchesData.map((p: any) => p.id));
+      const punchIds = punchesData.map(
+        (p: any) => p.id
+      );
+
+      const { data: breaksData } =
+        punchIds.length > 0
+          ? await supabase
+              .from('time_punch_breaks')
+              .select('*')
+              .eq('company_id', compId)
+              .in('punch_id', punchIds)
+              
+          : { data: [] };
 
       const schedSet = new Set(schedulesData?.map((s: any) => `${s.employee_id}_${s.date}`));
       let totalHours = 0;
@@ -359,11 +376,48 @@ export default function MyTimecards() {
           setCompanyId(companies[0].id); 
           
           // GRAB TIMEZONE_ID AND PROVINCE
-          const { data: storeData } = await supabase.from('stores').select('id, name, timezone_id, province').eq('company_id', companies[0].id);
-          const mappedStores = storeData ? storeData.sort((a: any, b: any) => a.name.localeCompare(b.name)) : [];
+          const { data: storeData } = await supabase
+            .from('stores')
+            .select(
+              'id, name, timezone_id, province, is_active'
+            )
+            .eq(
+              'company_id',
+              companies[0].id
+            );
+
+          const mappedStores = (storeData || [])
+            .filter((store: any) => {
+              const activeValue = String(
+                store.is_active ?? 1
+              ).toLowerCase();
+
+              return ![
+                "0",
+                "false"
+              ].includes(activeValue);
+            })
+            .sort(
+              (firstStore: any, secondStore: any) =>
+                firstStore.name.localeCompare(
+                  secondStore.name
+                )
+            );
+
           setStores(mappedStores);
 
-          const { data: empData } = await supabase.from('employees').select('id, first_name, last_name, company_id').eq('user_id', user.id).limit(1);
+          const { data: empData } = await supabase
+            .from('employees')
+            .select(
+              'id, first_name, last_name, company_id'
+            )
+            .eq(
+              'company_id',
+              companies[0].id
+            )
+            .eq('user_id', user.id)
+            .eq('status', 'Active')
+            .limit(1);
           if (empData && empData.length > 0) {
             setEmployee(empData[0]);
             
@@ -378,7 +432,15 @@ export default function MyTimecards() {
 
           // Auto Logout check
           if (cachedStore) {
-            const { data: sSet } = await supabase.from('store_time_clock_settings').select('*').eq('store_id', cachedStore).limit(1);
+            const { data: sSet } = await supabase
+              .from('store_time_clock_settings')
+              .select('*')
+              .eq(
+                'company_id',
+                companies[0].id
+              )
+              .eq('store_id', cachedStore)
+              .limit(1);
             if (sSet && sSet.length > 0) {
               const autoOut = sSet[0].auto_logout || sSet[0].auto_signout || sSet[0].enforce_auto_logout;
               if (String(autoOut).toLowerCase() === "true" || String(autoOut) === "1") setAutoLogoutEnabled(true);
@@ -567,41 +629,92 @@ export default function MyTimecards() {
         return oS !== nS || oE !== nE || b.break_type !== b.req_break_type;
       });
 
-      const { error: pErr } = await supabase.from('time_punches').update({
-        status: 'Pending Edit',
-        req_clock_in: isoIn,
-        req_clock_out: isoOut,
-        req_notes: editNotes.trim()
-      }).eq('id', editModalPunch.id);
+      const requestTimestamp =
+        new Date().toISOString();
+
+      const { error: pErr } = await supabase
+        .from('time_punches')
+        .update({
+          status: 'Pending Edit',
+          req_clock_in: isoIn,
+          req_clock_out: isoOut,
+          req_notes: editNotes.trim(),
+          updated_at: requestTimestamp
+        })
+        .eq('company_id', companyId)
+        .eq('id', editModalPunch.id);
 
       if (pErr) throw pErr;
 
       for (const b of updates) {
         if (b.is_new) {
-          await supabase.from('time_punch_breaks').insert({
-            id: b.id,
-            company_id: companyId,
-            punch_id: editModalPunch.id,
-            break_type: b.req_break_type,
-            req_break_start: b.req_break_start,
-            req_break_end: b.req_break_end,
-            req_break_type: b.req_break_type
-          });
+          const { error: breakInsertError } =
+            await supabase
+              .from('time_punch_breaks')
+              .insert({
+                id: b.id,
+                company_id: companyId,
+                punch_id: editModalPunch.id,
+                break_type:
+                  b.req_break_type || "Unpaid",
+                req_break_start:
+                  b.req_break_start,
+                req_break_end:
+                  b.req_break_end,
+                req_break_type:
+                  b.req_break_type || "Unpaid",
+                  updated_at: requestTimestamp
+              });
+
+          if (breakInsertError) {
+            throw breakInsertError;
+          }
         } else {
-          await supabase.from('time_punch_breaks').update({
-            req_break_start: b.req_break_start,
-            req_break_end: b.req_break_end,
-            req_break_type: b.req_break_type
-          }).eq('id', b.id);
+          const { error: breakUpdateError } =
+            await supabase
+              .from('time_punch_breaks')
+              .update({
+                req_break_start:
+                  b.req_break_start,
+                req_break_end:
+                  b.req_break_end,
+                req_break_type:
+                  b.req_break_type,
+                updated_at: requestTimestamp
+              })
+              .eq('company_id', companyId)
+              .eq('id', b.id);
+
+          if (breakUpdateError) {
+            throw breakUpdateError;
+          }
         }
       }
 
       setFeedbackModal({ type: "success", title: "Request Submitted", message: "Your timecard modification request has been sent to management." });
       closeEditModal();
-      fetchTimecards(employee!.id, companyId);
+      await fetchTimecards(
+        employee!.id,
+        companyId
+      );
 
     } catch (err: any) {
-      setFeedbackModal({ type: "error", title: "Error", message: "Failed to submit request. Please try again." });
+      console.error(
+        "Timecard edit request failed:",
+        {
+          message: err?.message,
+          details: err?.details,
+          hint: err?.hint,
+          code: err?.code
+        }
+      );
+
+      setFeedbackModal({
+        type: "error",
+        title: "Error",
+        message:
+          "Failed to submit request. Please try again."
+      });
     }
   };
 

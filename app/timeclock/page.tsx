@@ -63,7 +63,7 @@ export default function TimeClockLogin() {
 
   const [companyId, setCompanyId] = useState<string>("");
   const [stores, setStores] = useState<Store[]>([]);
-  const [themeColor, setThemeColor] = useState("#1F538D");
+  const [themeColor, setThemeColor] = useState("#189777");
 
   const [selectedStore, setSelectedStore] = useState("");
   const [username, setUsername] = useState("");
@@ -83,67 +83,165 @@ export default function TimeClockLogin() {
   // ============================================================================
   useEffect(() => {
     const initializePage = async () => {
-      const cachedColor = localStorage.getItem('chronara_theme_color');
-      if (cachedColor) setThemeColor(cachedColor);
+      const cachedStore =
+        localStorage.getItem('chronara_last_store');
 
-      const cachedStore = localStorage.getItem('chronara_last_store');
+      const {
+        data: { session }
+      } = await supabase.auth.getSession();
 
-      const { data: { session } } = await supabase.auth.getSession();
       if (!session) {
         router.push("/");
         return;
       }
 
       try {
-        const { data: companies } = await supabase
-          .from('companies')
-          .select('id, config_json') 
-          .or(`email.eq.${session.user.email},owner_email.eq.${session.user.email}`)
-          .limit(1);
+        const { data: companies, error: companyError } =
+          await supabase
+            .from('companies')
+            .select('id, config_json')
+            .or(
+              `email.eq.${session.user.email},owner_email.eq.${session.user.email}`
+            )
+            .limit(1);
 
-        if (companies && companies.length > 0) {
-          const comp = companies[0];
-          setCompanyId(comp.id); 
+        if (companyError) {
+          throw companyError;
+        }
 
-          if (comp.config_json) {
-            const config = JSON.parse(comp.config_json);
-            if (config.color_theme) {
-              setThemeColor(config.color_theme);
-              localStorage.setItem('chronara_theme_color', config.color_theme);
-            }
-          }
+        if (!companies || companies.length === 0) {
+          localStorage.removeItem(
+            'chronara_last_store'
+          );
 
-          const { data: storeData } = await supabase
-            .from('stores')
-            .select('id, name, is_active, province')
-            .eq('company_id', comp.id);
+          localStorage.removeItem(
+            'chronara_theme_color'
+          );
 
-          if (storeData) {
-            const activeStores = storeData.filter(s => {
-              const activeVal = String(s.is_active ?? 1).toLowerCase();
-              return !["0", "false"].includes(activeVal);
-            });
+          router.push("/");
+          return;
+        }
 
-            const sortedStores = activeStores.sort((a, b) => a.name.localeCompare(b.name));
-            setStores(sortedStores);
+        const comp = companies[0];
 
-            if (cachedStore && sortedStores.some(s => s.id === cachedStore)) {
-              setSelectedStore(cachedStore);
-            }
+        setCompanyId(comp.id);
+
+        let companyConfig: Record<string, any> = {};
+
+        if (comp.config_json) {
+          try {
+            companyConfig =
+              typeof comp.config_json === 'string'
+                ? JSON.parse(comp.config_json)
+                : comp.config_json;
+          } catch (configError) {
+            console.error(
+              "Could not parse company configuration:",
+              configError
+            );
           }
         }
-      } catch (error) {
-        console.error("Error fetching data:", error);
+
+        const cloudThemeColor =
+          typeof companyConfig.color_theme === 'string'
+          && /^#[0-9A-Fa-f]{6}$/.test(
+            companyConfig.color_theme
+          )
+            ? companyConfig.color_theme
+            : "#189777";
+
+        setThemeColor(cloudThemeColor);
+
+        localStorage.setItem(
+          'chronara_theme_color',
+          cloudThemeColor
+        );
+
+        const { data: storeData, error: storeError } =
+          await supabase
+            .from('stores')
+            .select(
+              'id, name, is_active, province'
+            )
+            .eq('company_id', comp.id);
+
+        if (storeError) {
+          throw storeError;
+        }
+
+        const activeStores =
+          (storeData || []).filter(store => {
+            const activeValue = String(
+              store.is_active ?? 1
+            ).toLowerCase();
+
+            return ![
+              "0",
+              "false"
+            ].includes(activeValue);
+          });
+
+        const sortedStores =
+          activeStores.sort(
+            (firstStore, secondStore) =>
+              firstStore.name.localeCompare(
+                secondStore.name
+              )
+          );
+
+        setStores(sortedStores);
+
+        let validStoreId = "";
+
+        if (
+          cachedStore
+          && sortedStores.some(
+            store => store.id === cachedStore
+          )
+        ) {
+          validStoreId = cachedStore;
+        } else if (sortedStores.length > 0) {
+          validStoreId = sortedStores[0].id;
+        }
+
+        setSelectedStore(validStoreId);
+
+        if (validStoreId) {
+          localStorage.setItem(
+            'chronara_last_store',
+            validStoreId
+          );
+        } else {
+          localStorage.removeItem(
+            'chronara_last_store'
+          );
+        }
+
+      } catch (error: any) {
+        console.error(
+          "Error fetching Time Clock data:",
+          {
+            message: error?.message,
+            details: error?.details,
+            hint: error?.hint,
+            code: error?.code,
+            originalError: error
+          }
+        );
       }
+
       setIsReady(true);
     };
 
     initializePage();
 
-    const timer = setInterval(() => setCurrentTime(new Date()), 1000);
+    const timer = setInterval(
+      () => setCurrentTime(new Date()),
+      1000
+    );
+
     return () => clearInterval(timer);
   }, [router]);
-
   // ============================================================================
   // 4. QUICK-PUNCH LISTENER & AUTO-REFRESH
   // ============================================================================
@@ -153,8 +251,10 @@ export default function TimeClockLogin() {
       let { data: punches } = await supabase
         .from('time_punches')
         .select('id, clock_in, clock_out, store_id')
+        .eq('company_id', companyId)
         .eq('employee_id', empId)
         .eq('store_id', selectedStore)
+
         .order('clock_in', { ascending: false })
         .limit(1);
 
@@ -165,7 +265,9 @@ export default function TimeClockLogin() {
         const { data: openPunches } = await supabase
           .from('time_punches')
           .select('id, clock_in, clock_out, store_id')
+          .eq('company_id', companyId)
           .eq('employee_id', empId)
+  
           .is('clock_out', null)
           .order('clock_in', { ascending: false })
           .limit(1);
@@ -238,12 +340,23 @@ export default function TimeClockLogin() {
             if (autoClockOutTime) {
                 const outIso = autoClockOutTime.toISOString();
                 await supabase.from('time_punches')
-                    .update({ clock_out: outIso, status: 'Pending Edit', req_notes: 'SYSTEM: Auto-Clocked Out (Forgot to punch)' })
+                    .update({
+                      clock_out: outIso,
+                      status: 'Pending Edit',
+                      req_notes: 'SYSTEM: Auto-Clocked Out (Forgot to punch)',
+                      updated_at: outIso
+                    })
+                    .eq('company_id', companyId)
                     .eq('id', punch.id);
                 
                 await supabase.from('time_punch_breaks')
-                    .update({ break_end: outIso })
-                    .eq('punch_id', punch.id).or('break_end.is.null,break_end.eq.""');
+                    .update({
+                      break_end: outIso,
+                      updated_at: outIso
+                    })
+                    .eq('company_id', companyId)
+                    .eq('punch_id', punch.id)
+                    .or('break_end.is.null,break_end.eq.""');
                 
                 autoClockedOut = true;
             }
@@ -261,8 +374,14 @@ export default function TimeClockLogin() {
 
         setActivePunchId(punch.id);
 
-        const { data: breaks } = await supabase.from('time_punch_breaks')
-          .select('id, break_end').eq('punch_id', punch.id).order('break_start', { ascending: false }).limit(1);
+        const { data: breaks } = await supabase
+          .from('time_punch_breaks')
+          .select('id, break_end')
+          .eq('company_id', companyId)
+          .eq('punch_id', punch.id)
+  
+          .order('break_start', { ascending: false })
+          .limit(1);
 
         if (breaks && breaks.length > 0 && !breaks[0].break_end) {
           setActiveBreakId(breaks[0].id);
@@ -290,13 +409,22 @@ export default function TimeClockLogin() {
       }
 
       try {
-        const { data: users } = await supabase
+        const { data: users, error: userError } = await supabase
           .from('users')
           .select('id, is_active')
           .eq('company_id', companyId)
-          .ilike('username', username) 
-          .eq('password', password) 
+          .ilike('username', username)
+          .eq('password', password)
           .limit(1);
+
+        if (userError) {
+          console.error("Quick punch user lookup failed:", {
+            message: userError.message,
+            details: userError.details,
+            hint: userError.hint,
+            code: userError.code
+          });
+        }
 
         if (!users || users.length === 0 || String(users[0].is_active).toLowerCase() === "0" || String(users[0].is_active).toLowerCase() === "false") {
           setPunchStatus("INVALID");
@@ -304,7 +432,19 @@ export default function TimeClockLogin() {
           return;
         }
 
-        const { data: emps } = await supabase.from('employees').select('id, store_id').eq('user_id', users[0].id);
+        const { data: emps, error: employeeError } = await supabase
+          .from('employees')
+          .select('id, store_id')
+          .eq('user_id', users[0].id);
+
+        if (employeeError) {
+          console.error("Quick punch employee lookup failed:", {
+            message: employeeError.message,
+            details: employeeError.details,
+            hint: employeeError.hint,
+            code: employeeError.code
+          });
+        }
 
         if (!emps || emps.length === 0) {
           setPunchStatus("INVALID");
@@ -455,15 +595,35 @@ export default function TimeClockLogin() {
       const punchId = `tck_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
       const nowIso = new Date().toISOString();
 
-      const { error: err1 } = await supabase.from('time_punches').insert({
-        id: punchId, company_id: companyId, employee_id: quickEmpId, store_id: selectedStore || null, clock_in: nowIso, type: "Regular", status: "Approved", applied_rounding_mins: appliedRoundingMins
-      });
-
-      if (err1) {
-        const { error: err2 } = await supabase.from('time_punches').insert({
-          id: punchId, company_id: companyId, employee_id: quickEmpId, store_id: selectedStore || null, clock_in: nowIso, type: "Regular", status: "Approved"
+      const { error: clockInError } = await supabase
+        .from('time_punches')
+        .insert({
+          id: punchId,
+          company_id: companyId,
+          employee_id: quickEmpId,
+          store_id: selectedStore || null,
+          clock_in: nowIso,
+          type: "Regular",
+          status: "Approved",
+          applied_rounding_mins:
+            appliedRoundingMins,
+          updated_at: nowIso
         });
-        if (err2) throw err2;
+
+      if (clockInError) {
+        if (clockInError.code !== "23505") {
+          console.error(
+            "Quick clock-in insert failed:",
+            {
+              message: clockInError.message,
+              details: clockInError.details,
+              hint: clockInError.hint,
+              code: clockInError.code
+            }
+          );
+        }
+
+        throw clockInError;
       }
       
       let displayMsg = "Welcome, {name}!";
@@ -476,8 +636,19 @@ export default function TimeClockLogin() {
           const { data: compData } = await supabase.from('companies').select('config_json').eq('id', companyId).single();
           if (compData && compData.config_json) {
             try {
-              const config = JSON.parse(compData.config_json);
-              if (config.default_clock_in_message) displayMsg = config.default_clock_in_message;
+              const config =
+                typeof compData.config_json === "string"
+                  ? JSON.parse(
+                      compData.config_json
+                    )
+                  : compData.config_json;
+
+              if (
+                config.default_clock_in_message
+              ) {
+                displayMsg =
+                  config.default_clock_in_message;
+              }
             } catch (e) {}
           }
         }
@@ -511,7 +682,23 @@ export default function TimeClockLogin() {
         setFeedbackModal({ type: "info", title: "Already Clocked In", message: "You are already clocked in! Your buttons have been refreshed." });
         if (quickEmpId) await checkPunchStatus(quickEmpId);
       } else {
-        setFeedbackModal({ type: "error", title: "Error", message: "Error Clocking In. Please try again." });
+        console.error(
+          "Quick clock-in failed:",
+          {
+            message: err?.message,
+            details: err?.details,
+            hint: err?.hint,
+            code: err?.code
+          }
+        );
+
+        setFeedbackModal({
+          type: "error",
+          title: "Error",
+          message:
+            err?.message ||
+            "Error Clocking In. Please try again."
+        });
       }
     }
   };
@@ -525,7 +712,13 @@ export default function TimeClockLogin() {
     const activeTz = getActiveTimezone();
 
     try {
-      const { data: punchData } = await supabase.from('time_punches').select('clock_in, store_id').eq('id', activePunchId).single();
+      const { data: punchData } = await supabase
+        .from('time_punches')
+        .select('clock_in, store_id')
+        .eq('company_id', companyId)
+        .eq('id', activePunchId)
+
+        .single();
       
       if (punchData && punchData.clock_in) {
           const clockInDt = new Date(punchData.clock_in);
@@ -541,7 +734,13 @@ export default function TimeClockLogin() {
 
           // Calculate current net hours (simplified for the gatekeeper check)
           const grossSec = (new Date().getTime() - clockInDt.getTime()) / 1000;
-          const { data: breaksData } = await supabase.from('time_punch_breaks').select('break_start, break_end').eq('punch_id', activePunchId).eq('break_type', 'Unpaid');
+          const { data: breaksData } = await supabase
+            .from('time_punch_breaks')
+            .select('break_start, break_end')
+            .eq('company_id', companyId)
+            .eq('punch_id', activePunchId)
+            .eq('break_type', 'Unpaid')
+    ;
           let breakSec = 0;
           breaksData?.forEach(b => {
              if (b.break_start && b.break_end) breakSec += (new Date(b.break_end).getTime() - new Date(b.break_start).getTime()) / 1000;
@@ -561,11 +760,27 @@ export default function TimeClockLogin() {
           }
       }
 
-      const { error } = await supabase.from('time_punches').update({ clock_out: finalOutIso, status: 'Approved' }).eq('id', activePunchId);
+      const { error } = await supabase
+        .from('time_punches')
+        .update({
+          clock_out: finalOutIso,
+          status: 'Approved',
+          updated_at: finalOutIso
+        })
+        .eq('company_id', companyId)
+        .eq('id', activePunchId);
+
       if (error) throw error;
 
       if (activeBreakId) {
-        await supabase.from('time_punch_breaks').update({ break_end: finalOutIso }).eq('id', activeBreakId);
+        await supabase
+          .from('time_punch_breaks')
+          .update({
+            break_end: finalOutIso,
+            updated_at: finalOutIso
+          })
+          .eq('company_id', companyId)
+          .eq('id', activeBreakId);
       }
 
       setFeedbackModal({
@@ -593,7 +808,13 @@ export default function TimeClockLogin() {
     try {
       // --- NEW: DB GATEKEEPER CHECK ---
       // Verifies the punch isn't already clocked out before allowing a break
-      const { data: punchCheck } = await supabase.from('time_punches').select('clock_out').eq('id', activePunchId).single();
+      const { data: punchCheck } = await supabase
+        .from('time_punches')
+        .select('clock_out')
+        .eq('company_id', companyId)
+        .eq('id', activePunchId)
+
+        .single();
       if (punchCheck && punchCheck.clock_out) {
         setFeedbackModal({ type: "info", title: "Shift Ended", message: "This shift was already clocked out on another device." });
         if (quickEmpId) await checkPunchStatus(quickEmpId);
@@ -604,9 +825,16 @@ export default function TimeClockLogin() {
       const breakId = `tcb_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`;
       const nowIso = new Date().toISOString();
 
-      const { error } = await supabase.from('time_punch_breaks').insert({
-        id: breakId, company_id: companyId, punch_id: activePunchId, break_start: nowIso, break_type: breakType
-      });
+      const { error } = await supabase
+        .from('time_punch_breaks')
+        .insert({
+          id: breakId,
+          company_id: companyId,
+          punch_id: activePunchId,
+          break_start: nowIso,
+          break_type: breakType,
+          updated_at: nowIso
+        });
       if (error) throw error;
 
       setFeedbackModal({
@@ -638,7 +866,14 @@ export default function TimeClockLogin() {
     const nowIso = new Date().toISOString();
 
     try {
-      const { error } = await supabase.from('time_punch_breaks').update({ break_end: nowIso }).eq('id', activeBreakId);
+      const { error } = await supabase
+        .from('time_punch_breaks')
+        .update({
+          break_end: nowIso,
+          updated_at: nowIso
+        })
+        .eq('company_id', companyId)
+        .eq('id', activeBreakId);
       if (error) throw error;
 
       setFeedbackModal({
@@ -666,12 +901,24 @@ export default function TimeClockLogin() {
     if (!username || !password) return setErrorMsg("Username and password required.");
 
     try {
-      const { data: users, error } = await supabase.from('users')
-        .select('id, username, is_active, is_owner, is_admin') // Added is_owner, is_admin
+      const { data: users, error } = await supabase
+        .from('users')
+        .select(
+          'id, username, is_active, is_owner, is_admin'
+        )
         .eq('company_id', companyId)
         .ilike('username', username)
         .eq('password', password)
         .limit(1);
+
+      if (error) {
+        console.error("Dashboard user lookup failed:", {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        });
+      }
 
       if (error || !users || users.length === 0) return setErrorMsg("Invalid username or password.");
 
@@ -683,7 +930,19 @@ export default function TimeClockLogin() {
       const isAdmin = user.is_admin === 1 || String(user.is_admin).toLowerCase() === "true";
 
       // --- NEW: STRICT EMPLOYEE & DASHBOARD CHECK ---
-      const { data: emps } = await supabase.from('employees').select('id, store_id').eq('user_id', user.id);
+      const { data: emps, error: employeeError } = await supabase
+        .from('employees')
+        .select('id, store_id')
+        .eq('user_id', user.id);
+
+      if (employeeError) {
+        console.error("Dashboard employee lookup failed:", {
+          message: employeeError.message,
+          details: employeeError.details,
+          hint: employeeError.hint,
+          code: employeeError.code
+        });
+      }
       
       if (!emps || emps.length === 0) {
         return setErrorMsg("User not connected to an employee. Please contact management.");

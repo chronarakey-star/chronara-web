@@ -343,7 +343,12 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         for (let i = 0; i < saleIds.length; i += chunkSize) {
           const chunk = saleIds.slice(i, i + chunkSize);
           const paymentsData = await fetchAll(
-            supabase.from("sale_payments").select("method, amount").in("sale_id", chunk)
+            supabase
+              .from("sale_payments")
+              .select("method, amount")
+              .eq("company_id", companyId)
+              .in("sale_id", chunk)
+              .neq("is_deleted", true)
           );
           allPayments = allPayments.concat(paymentsData);
         }
@@ -557,9 +562,28 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
              for (let i = 0; i < saleIds.length; i += chunkSize) {
                  const chunk = saleIds.slice(i, i + chunkSize);
                  const [tipsData, commsData, itemsData] = await Promise.all([
-                     fetchAll(supabase.from('tips_ledger').select('amount').in('sale_id', chunk)),
-                     fetchAll(supabase.from('commissions_ledger').select('amount').in('sale_id', chunk)),
-                     fetchAll(supabase.from('sale_items').select('sku, product_id, qty, price, cost, tax_code, prov_tax_code, tax_val, prov_tax_val, is_damaged').in('sale_id', chunk))
+                     fetchAll(
+                         supabase
+                             .from('tips_ledger')
+                             .select('amount')
+                             .eq('company_id', companyId)
+                             .in('sale_id', chunk)
+                     ),
+                     fetchAll(
+                         supabase
+                             .from('commissions_ledger')
+                             .select('amount')
+                             .eq('company_id', companyId)
+                             .in('sale_id', chunk)
+                     ),
+                     fetchAll(
+                         supabase
+                             .from('sale_items')
+                             .select('sku, product_id, qty, price, cost, tax_code, prov_tax_code, tax_val, prov_tax_val, is_damaged')
+                             .eq('company_id', companyId)
+                             .in('sale_id', chunk)
+                             .neq('is_deleted', true)
+                     )
                  ]);
                  allTips = allTips.concat(tipsData);
                  allComms = allComms.concat(commsData);
@@ -842,8 +866,10 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
                 supabase
                   .from("sale_payments")
                   .select("method, amount")
+                  .eq("company_id", companyId)
                   .in("sale_id", chunk)
                   .eq("method", "Cash")
+                  .neq("is_deleted", true)
               );
               allCashPayments = allCashPayments.concat(paymentsData);
             }
@@ -934,68 +960,68 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
   };
 
   const handlePrintZReport = () => {
-    const printWindow = window.open("", "_blank", "width=600,height=800");
-    if (!printWindow) {
-      alert("Please allow pop-ups to print the Z-Report.");
-      return;
-    }
+    const printWindow = window.open("", "_blank", "width=600,height=800");
+    if (!printWindow) {
+      alert("Please allow pop-ups to print the Z-Report.");
+      return;
+    }
 
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <title>Z-Report - ${storeName}</title>
-        <style>
-          @media print {
-            @page { margin: 0; }
-            body { margin: 10mm; }
-          }
-          body {
-            font-family: 'Courier New', Courier, monospace;
-            font-size: 12px;
-            color: #000;
-            line-height: 1.4;
-            max-width: 80mm; /* Standard receipt width */
-            margin: 0 auto;
-            padding: 20px;
-          }
-          .title {
-            text-align: center;
-            font-family: Arial, sans-serif;
-            font-size: 16px;
-            font-weight: bold;
-            margin-bottom: 10px;
-          }
-          .header-info {
-            font-family: Arial, sans-serif;
-            font-size: 12px;
-            margin-bottom: 20px;
-          }
-          .content {
-            white-space: pre-wrap;
-          }
-        </style>
-      </head>
-      <body>
-        <div class="title">Z-REPORT SUMMARY</div>
-        <div class="header-info">
-          <div>Store: ${storeName}</div>
-          <div>User: ${user?.username || "Unknown"}</div>
-        </div>
-        <div class="content">${successBody}</div>
-        <script>
-          window.onload = () => {
-            window.print();
-          };
-        </script>
-      </body>
-      </html>
-    `;
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <title>Z-Report - ${storeName}</title>
+        <style>
+          @media print {
+            @page { margin: 0; }
+            body { margin: 10mm; }
+          }
+          body {
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 12px;
+            color: #000;
+            line-height: 1.4;
+            max-width: 80mm; /* Standard receipt width */
+            margin: 0 auto;
+            padding: 20px;
+          }
+          .title {
+            text-align: center;
+            font-family: Arial, sans-serif;
+            font-size: 16px;
+            font-weight: bold;
+            margin-bottom: 10px;
+          }
+          .header-info {
+            font-family: Arial, sans-serif;
+            font-size: 12px;
+            margin-bottom: 20px;
+          }
+          .content {
+            white-space: pre-wrap;
+          }
+        </style>
+      </head>
+      <body>
+        <div class="title">Z-REPORT SUMMARY</div>
+        <div class="header-info">
+          <div>Store: ${storeName}</div>
+          <div>User: ${user?.username || "Unknown"}</div>
+        </div>
+        <div class="content">${successBody}</div>
+        <script>
+          window.onload = () => {
+            window.print();
+          };
+        </script>
+      </body>
+      </html>
+    `;
 
-    printWindow.document.open();
-    printWindow.document.write(htmlContent);
-    printWindow.document.close();
-  };
+    printWindow.document.open();
+    printWindow.document.write(htmlContent);
+    printWindow.document.close();
+  };
 
   const handleModalClose = () => {
     setShowSuccess(false);

@@ -79,7 +79,11 @@ const getItemSurcharge = (item: any) => {
     }, 0);
 };
 
-const printWebReceipt = (receiptData: any, configJson: any) => {
+const printWebReceipt = (
+    receiptData: any,
+    configJson: any,
+    shouldPrint: boolean = true
+) => {
     const defaultSettings = {
         font: "Times-Roman",
         paper_width: "80(mm)",
@@ -311,15 +315,62 @@ const printWebReceipt = (receiptData: any, configJson: any) => {
         </html>
     `;
 
-    const printWindow = window.open('', '_blank', 'width=400,height=600');
-    if (printWindow) {
-        printWindow.document.write(html);
-        printWindow.document.close();
-        printWindow.focus();
-        setTimeout(() => {
-            printWindow.print();
-            printWindow.close();
-        }, 500);
+    if (shouldPrint) {
+        const printWindow = window.open('', '_blank', 'width=400,height=600');
+
+        if (printWindow) {
+            printWindow.document.write(html);
+            printWindow.document.close();
+            printWindow.focus();
+
+            setTimeout(() => {
+                printWindow.print();
+                printWindow.close();
+            }, 500);
+        }
+    }
+
+    return html;
+};
+
+const sendReceiptEmail = async (
+    companyId: string,
+    recipientEmail: string,
+    receiptData: any,
+    rawConfig: any
+) => {
+    const { data: sessionData } = await supabase.auth.getSession();
+    const accessToken = sessionData.session?.access_token;
+
+    if (!accessToken) {
+        throw new Error("Your login session has expired. Please sign in again.");
+    }
+
+    const receiptHtml = printWebReceipt(
+        receiptData,
+        rawConfig,
+        false
+    );
+
+    const response = await fetch("/api/send-receipt", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${accessToken}`
+        },
+        body: JSON.stringify({
+            companyId,
+            recipientEmail,
+            receiptHtml,
+            saleId: receiptData.sale_id,
+            companyName: receiptData.companyName
+        })
+    });
+
+    const result = await response.json();
+
+    if (!response.ok || !result.success) {
+        throw new Error(result.error || "The receipt could not be emailed.");
     }
 };
 
@@ -356,6 +407,12 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   const [linkedRefunds, setLinkedRefunds] = useState<Sale[]>([]);
   const [isDeleting, setIsDeleting] = useState(false);
   const [gcUsedLock, setGcUsedLock] = useState(false);
+
+  const [showEmailReceipt, setShowEmailReceipt] = useState(false);
+  const [receiptEmail, setReceiptEmail] = useState("");
+  const [isEmailingReceipt, setIsEmailingReceipt] = useState(false);
+  const [emailReceiptError, setEmailReceiptError] = useState("");
+
   // --- INITIALIZATION ---
   const isInitialMount = useRef(true);
 
@@ -433,7 +490,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   };
 
   // --- PRINT HANDLER ---
-  const handlePrintReceipt = () => {
+  const buildHistoricalReceiptData = () => {
     if (!selectedSale) return;
     
     // Reverse engineer the subtotal and parse the ingredient snapshots
@@ -528,7 +585,80 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
         gc_balances: [] 
     };
 
-    printWebReceipt(receiptData, rawConfig);
+    return receiptData;
+  };
+
+  const handlePrintReceipt = () => {
+    const receiptData = buildHistoricalReceiptData();
+
+    if (!receiptData) {
+      return;
+    }
+
+    printWebReceipt(
+      receiptData,
+      rawConfig
+    );
+  };
+
+  const openEmailReceiptDialog = () => {
+    if (!selectedSale) {
+      return;
+    }
+
+    setReceiptEmail("");
+    setEmailReceiptError("");
+    setShowEmailReceipt(true);
+  };
+
+  const handleEmailHistoricalReceipt = async () => {
+    const recipientEmail = receiptEmail.trim();
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(recipientEmail)) {
+      setEmailReceiptError(
+        "Please enter a valid email address."
+      );
+      return;
+    }
+
+    const receiptData = buildHistoricalReceiptData();
+
+    if (!receiptData) {
+      setEmailReceiptError(
+        "The receipt information could not be prepared."
+      );
+      return;
+    }
+
+    setIsEmailingReceipt(true);
+    setEmailReceiptError("");
+
+    try {
+      await sendReceiptEmail(
+        companyId,
+        recipientEmail,
+        receiptData,
+        rawConfig
+      );
+
+      setShowEmailReceipt(false);
+      setReceiptEmail("");
+
+      window.alert(
+        `Receipt emailed to ${recipientEmail}.`
+      );
+
+    } catch (error) {
+      const message =
+        error instanceof Error
+          ? error.message
+          : "The receipt could not be emailed.";
+
+      setEmailReceiptError(message);
+
+    } finally {
+      setIsEmailingReceipt(false);
+    }
   };
 
   // ==========================================
@@ -631,6 +761,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       const { data: items } = await supabase
         .from("sale_items")
         .select("*")
+        .eq("company_id", companyId)
         .eq("sale_id", sale.id)
         .neq("is_deleted", true);
 
@@ -659,6 +790,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       const { data: payments } = await supabase
         .from("sale_payments")
         .select("*")
+        .eq("company_id", companyId)
         .eq("sale_id", sale.id)
         .neq("is_deleted", true);
       if (payments) setSalePayments(payments);
@@ -667,6 +799,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       const { data: refunds } = await supabase
         .from("sales")
         .select("*")
+        .eq("company_id", companyId)
         .eq("is_refund_of", sale.id)
         .neq("is_deleted", true);
       if (refunds) setLinkedRefunds(refunds);
@@ -771,6 +904,7 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
               const { data: otherPayments } = await supabase
                   .from('sale_payments')
                   .select('sale_id')
+                  .eq('company_id', companyId)
                   .ilike('method', 'gift card')
                   .eq('payment_ref', cNum)
                   .neq('is_deleted', true)
@@ -915,17 +1049,52 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
       // 2. SOFT DELETES ONLY: Update the `date` to NOW so Python's time-filter catches the deletion!
 
-      await supabase.from("sale_items").update({ is_deleted: true }).eq("sale_id", selectedSale.id);
+      await supabase
+        .from("sale_items")
+        .update({
+          is_deleted: true,
+          updated_at: timestampStr
+        })
+        .eq("company_id", companyId)
+        .eq("sale_id", selectedSale.id);
 
-      await supabase.from("sale_payments").update({ is_deleted: true }).eq("sale_id", selectedSale.id);
+      await supabase
+        .from("sale_payments")
+        .update({
+          is_deleted: true,
+          updated_at: timestampStr
+        })
+        .eq("company_id", companyId)
+        .eq("sale_id", selectedSale.id);
 
-      await supabase.from("tips_ledger").update({ is_deleted: true, date: timestampStr }).eq("sale_id", selectedSale.id);
+      await supabase
+        .from("tips_ledger")
+        .update({
+          is_deleted: true,
+          date: timestampStr
+        })
+        .eq("company_id", companyId)
+        .eq("sale_id", selectedSale.id);
 
-      await supabase.from("commissions_ledger").update({ is_deleted: true, date: timestampStr }).eq("sale_id", selectedSale.id);
+      await supabase
+        .from("commissions_ledger")
+        .update({
+          is_deleted: true,
+          date: timestampStr
+        })
+        .eq("company_id", companyId)
+        .eq("sale_id", selectedSale.id);
 
       
 
-      const { error: saleError } = await supabase.from("sales").update({ is_deleted: true, date: timestampStr }).eq("id", selectedSale.id);
+      const { error: saleError } = await supabase
+        .from("sales")
+        .update({
+          is_deleted: true,
+          date: timestampStr
+        })
+        .eq("company_id", companyId)
+        .eq("id", selectedSale.id);
 
       if (saleError) throw new Error(`Sales Table: ${saleError.message}`);
 
@@ -1327,6 +1496,13 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                       Print Receipt
                     </button>
 
+                    <button
+                      onClick={openEmailReceiptDialog}
+                      className="flex-1 py-4 border border-[#3B8ED0] rounded text-[#3B8ED0] font-bold hover:bg-[#23364A] transition-colors uppercase tracking-wider"
+                    >
+                      Email Receipt
+                    </button>
+
                     {/* --- THE FIX: ROUTE BETWEEN REFUNDS AND UNDOS --- */}
                     {selectedSale.total < -0.01 ? (
                         // It's a refund record -> Show Undo
@@ -1383,6 +1559,82 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
               </div>
             )}
 
+          </div>
+        </div>
+      )}
+
+      {showEmailReceipt && (
+        <div className="absolute inset-0 z-[100] bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-[#1a1a1a] border border-gray-700 rounded-xl shadow-2xl w-full max-w-md overflow-hidden">
+            <div className="p-6">
+              <div className="flex items-center justify-between mb-4">
+                <h2 className="text-xl font-bold text-white">
+                  Email Receipt
+                </h2>
+
+                <button
+                  onClick={() => {
+                    if (!isEmailingReceipt) {
+                      setShowEmailReceipt(false);
+                    }
+                  }}
+                  className="text-gray-500 hover:text-[#C92C2C] text-xl font-bold"
+                >
+                  ✕
+                </button>
+              </div>
+
+              <p className="text-gray-300 text-sm mb-5">
+                Enter the email address that should receive this receipt.
+              </p>
+
+              <input
+                type="email"
+                autoFocus
+                value={receiptEmail}
+                onChange={(event) => {
+                  setReceiptEmail(event.target.value);
+                  setEmailReceiptError("");
+                }}
+                onKeyDown={(event) => {
+                  if (
+                    event.key === "Enter" &&
+                    !isEmailingReceipt
+                  ) {
+                    handleEmailHistoricalReceipt();
+                  }
+                }}
+                placeholder="customer@email.com"
+                disabled={isEmailingReceipt}
+                className="w-full bg-[#141414] border border-gray-600 rounded p-3 text-white outline-none focus:border-[#3B8ED0]"
+              />
+
+              {emailReceiptError && (
+                <p className="text-[#C92C2C] text-sm font-semibold mt-3">
+                  {emailReceiptError}
+                </p>
+              )}
+            </div>
+
+            <div className="flex border-t border-gray-800 bg-[#222222]">
+              <button
+                onClick={() => setShowEmailReceipt(false)}
+                disabled={isEmailingReceipt}
+                className="flex-1 py-4 text-gray-400 font-bold hover:bg-[#2a2a2a] disabled:opacity-50 uppercase tracking-wider text-sm"
+              >
+                Cancel
+              </button>
+
+              <button
+                onClick={handleEmailHistoricalReceipt}
+                disabled={isEmailingReceipt}
+                className="flex-1 py-4 text-[#3B8ED0] font-bold hover:bg-[#23364A] disabled:opacity-50 uppercase tracking-wider text-sm border-l border-gray-800"
+              >
+                {isEmailingReceipt
+                  ? "Sending..."
+                  : "Send Receipt"}
+              </button>
+            </div>
           </div>
         </div>
       )}

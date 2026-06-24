@@ -80,7 +80,7 @@ export default function TimeClockSchedule() {
   const router = useRouter();
   const [isReady, setIsReady] = useState(false);
 
-  const [themeColor, setThemeColor] = useState("#00A023");
+  const [themeColor, setThemeColor] = useState("#189777");
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [myEmpIds, setMyEmpIds] = useState<string[]>([]); // ADD THIS LINE
   const [storeId, setStoreId] = useState<string>("");
@@ -98,7 +98,11 @@ export default function TimeClockSchedule() {
   // 3. DATA FETCHING
   // ============================================================================
   
-  const loadScheduleData = async (comp_id: string, s_id: string) => {
+  const loadScheduleData = async (
+    comp_id: string,
+    s_id: string,
+    activeTimezone: string = storeTimezone
+  ) => {
     try {
       let empsQuery = supabase.from('employees').select('id, first_name, last_name').eq('company_id', comp_id).eq('status', 'Active');
       if (s_id && s_id !== "ALL_STORES") empsQuery = empsQuery.eq('store_id', s_id);
@@ -118,8 +122,15 @@ export default function TimeClockSchedule() {
       const paddedStartDt = new Date(startDt); paddedStartDt.setDate(paddedStartDt.getDate() - 3);
       const paddedEndDt = new Date(endDt); paddedEndDt.setDate(paddedEndDt.getDate() + 3);
 
-      const startStr = getZonedDateStr(paddedStartDt, storeTimezone);
-      const endStr = getZonedDateStr(paddedEndDt, storeTimezone);
+      const startStr = getZonedDateStr(
+        paddedStartDt,
+        activeTimezone
+      );
+
+      const endStr = getZonedDateStr(
+        paddedEndDt,
+        activeTimezone
+      );
 
       let shiftsQuery = supabase.from('schedules').select('*').eq('company_id', comp_id).gte('date', startStr).lte('date', endStr);
       if (s_id && s_id !== "ALL_STORES") shiftsQuery = shiftsQuery.eq('store_id', s_id);
@@ -177,10 +188,29 @@ export default function TimeClockSchedule() {
         }
 
         // --- NEW: Remove limit(1) and store ALL linked profile IDs ---
-        const { data: empData } = await supabase
-          .from('employees')
-          .select('id, first_name, last_name') 
-          .eq('user_id', user.id);
+        const { data: empData, error: employeeError } =
+          await supabase
+            .from('employees')
+            .select(
+              'id, first_name, last_name'
+            )
+            .eq(
+              'company_id',
+              currentCompanyId
+            )
+            .eq('user_id', user.id);
+
+        if (employeeError) {
+          console.error(
+            "Schedule employee lookup failed:",
+            {
+              message: employeeError.message,
+              details: employeeError.details,
+              hint: employeeError.hint,
+              code: employeeError.code
+            }
+          );
+        }
 
         if (empData && empData.length > 0) {
           setEmployee(empData[0]);
@@ -191,11 +221,32 @@ export default function TimeClockSchedule() {
         // --- FETCH STORE TIMEZONE ---
         let fetchedTz = "America/Toronto";
         if (currentStoreId && currentStoreId !== "ALL_STORES") {
-            const { data: storeInfo } = await supabase
+            const {
+              data: storeInfo,
+              error: storeError
+            } = await supabase
               .from('stores')
-              .select('province, timezone_id')
+              .select(
+                'province, timezone_id'
+              )
+              .eq(
+                'company_id',
+                currentCompanyId
+              )
               .eq('id', currentStoreId)
               .single();
+
+            if (storeError) {
+              console.error(
+                "Schedule store lookup failed:",
+                {
+                  message: storeError.message,
+                  details: storeError.details,
+                  hint: storeError.hint,
+                  code: storeError.code
+                }
+              );
+            }
 
             if (storeInfo) {
                 fetchedTz = getStoreTimezone(storeInfo.province || "", false, storeInfo.timezone_id);
@@ -206,8 +257,15 @@ export default function TimeClockSchedule() {
             setStoreTimezone(fetchedTz);
         }
 
-        if (currentCompanyId && currentStoreId) {
-          await loadScheduleData(currentCompanyId, currentStoreId);
+        if (
+          currentCompanyId
+          && currentStoreId
+        ) {
+          await loadScheduleData(
+            currentCompanyId,
+            currentStoreId,
+            fetchedTz
+          );
         }
       } catch (err) {
         console.error("Error fetching context:", err);

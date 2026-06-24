@@ -59,17 +59,35 @@ export default function POSLogin() {
           setCompanyId(comp.id); 
 
           if (comp.config_json) {
-            const config = JSON.parse(comp.config_json);
+            const config =
+              typeof comp.config_json === "string"
+                ? JSON.parse(comp.config_json)
+                : comp.config_json;
+
             if (config.color_theme) {
               setThemeColor(config.color_theme);
-              localStorage.setItem('chronara_theme_color', config.color_theme);
+              localStorage.setItem(
+                'chronara_theme_color',
+                config.color_theme
+              );
             }
           }
 
-          const { data: storeData } = await supabase
+          const { data: storeData, error: storeError } = await supabase
             .from('stores')
             .select('id, name, is_active')
             .eq('company_id', comp.id);
+
+          if (storeError) {
+            console.error("POS store lookup failed:", {
+              message: storeError.message,
+              details: storeError.details,
+              hint: storeError.hint,
+              code: storeError.code
+            });
+
+            throw storeError;
+          }
 
           if (storeData) {
             const activeStores = storeData.filter(s => {
@@ -114,9 +132,18 @@ export default function POSLogin() {
         .from('users')
         .select('id, username, is_active')
         .eq('company_id', companyId)
-        .ilike('username', username) 
-        .eq('password', password) 
+        .ilike('username', username)
+        .eq('password', password)
         .limit(1);
+
+      if (error) {
+        console.error("POS user lookup failed:", {
+          message: error.message,
+          details: error.details,
+          hint: error.hint,
+          code: error.code
+        });
+      }
 
       if (error || !users || users.length === 0) {
         return setErrorMsg("Invalid username or password.");
