@@ -407,9 +407,17 @@ export default function SalesModule({
   const [page, setPage] = useState(1);
   const limit = 25;
   const [searchQuery, setSearchQuery] = useState("");
-  const [filterStore, setFilterStore] = useState("ALL_STORES");
-  const [filterUser, setFilterUser] = useState("ALL_USERS");
-  const [filterDate, setFilterDate] = useState("");
+  const [filterStore, setFilterStore] =
+    useState("ALL_STORES");
+
+  const [filterUser, setFilterUser] =
+    useState("ALL_USERS");
+
+  const [filterTill, setFilterTill] =
+    useState("ALL_TILLS");
+
+  const [filterDate, setFilterDate] =
+    useState("");
 
   // Maps for ID -> Name lookup
   const [storeMap, setStoreMap] =
@@ -459,7 +467,14 @@ export default function SalesModule({
     // Reset to page 1 if filters change
     setPage(1);
     fetchSales(1);
-  }, [companyId, filterStore, filterUser, filterDate, searchQuery]);
+  }, [
+    companyId,
+    filterStore,
+    filterUser,
+    filterTill,
+    filterDate,
+    searchQuery
+  ]);
 
   useEffect(() => {
     // THE FIX: Prevent double-fetching on the very first load,
@@ -888,6 +903,7 @@ export default function SalesModule({
     tillId,
     filterStore,
     filterUser,
+    filterTill,
     filterDate,
     searchQuery,
     page
@@ -907,9 +923,47 @@ export default function SalesModule({
         .neq("is_deleted", true);
 
       // Apply Dropdown Filters
-      if (filterStore !== "ALL_STORES") query = query.eq("store_id", filterStore);
-      if (filterUser !== "ALL_USERS") query = query.eq("user_id", filterUser);
-      if (filterDate) query = query.like("date", `${filterDate}%`);
+      if (
+        filterStore !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          "store_id",
+          filterStore
+        );
+      }
+
+      if (
+        filterUser !== "ALL_USERS"
+      ) {
+        query = query.eq(
+          "user_id",
+          filterUser
+        );
+      }
+
+      if (
+        filterTill === "UNASSIGNED"
+      ) {
+        query = query.is(
+          "till_id",
+          null
+        );
+
+      } else if (
+        filterTill !== "ALL_TILLS"
+      ) {
+        query = query.eq(
+          "till_id",
+          filterTill
+        );
+      }
+
+      if (filterDate) {
+        query = query.like(
+          "date",
+          `${filterDate}%`
+        );
+      }
 
       // Apply Text Search (ID or Customer)
       if (searchQuery.trim()) {
@@ -1442,7 +1496,7 @@ export default function SalesModule({
           <div className="flex">
             <input
               type="text"
-              placeholder="Search (Sale #, Customer Name)"
+              placeholder="Search (Sale #, Customer, Store, Till, User)"
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               style={{ "--focus-color": themeColor } as React.CSSProperties}
@@ -1471,17 +1525,32 @@ export default function SalesModule({
             </div>
 
             <div className="flex items-center gap-2">
-              <label className="text-[12px] font-bold text-gray-500 uppercase">User:</label>
+              <label className="text-[12px] font-bold text-gray-500 uppercase">
+                User:
+              </label>
+
               <select
                 value={filterUser}
-                onChange={(e) => setFilterUser(e.target.value)}
+                onChange={(e) =>
+                  setFilterUser(
+                    e.target.value
+                  )
+                }
                 className="bg-[#141414] border border-gray-700 rounded p-2 text-white text-sm outline-none w-40"
               >
-                <option value="ALL_USERS">All Users</option>
+                <option value="ALL_USERS">
+                  All Users
+                </option>
+
                 {Object.entries(userMap)
-                  .sort(([, a], [, b]) => a.localeCompare(b))
+                  .sort(([, a], [, b]) =>
+                    a.localeCompare(b)
+                  )
                   .map(([id, name]) => (
-                    <option key={id} value={id}>
+                    <option
+                      key={id}
+                      value={id}
+                    >
                       {name}
                     </option>
                   ))}
@@ -1489,7 +1558,46 @@ export default function SalesModule({
             </div>
 
             <div className="flex items-center gap-2">
-              <label className="text-[12px] font-bold text-gray-500 uppercase">Date:</label>
+              <label className="text-[12px] font-bold text-gray-500 uppercase">
+                Till:
+              </label>
+
+              <select
+                value={filterTill}
+                onChange={(e) =>
+                  setFilterTill(
+                    e.target.value
+                  )
+                }
+                className="bg-[#141414] border border-gray-700 rounded p-2 text-white text-sm outline-none w-40"
+              >
+                <option value="ALL_TILLS">
+                  All Tills
+                </option>
+
+                <option value="UNASSIGNED">
+                  Unassigned
+                </option>
+
+                {Object.entries(tillMap)
+                  .sort(([, a], [, b]) =>
+                    a.localeCompare(b)
+                  )
+                  .map(([id, name]) => (
+                    <option
+                      key={id}
+                      value={id}
+                    >
+                      {name}
+                    </option>
+                  ))}
+              </select>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <label className="text-[12px] font-bold text-gray-500 uppercase">
+                Date:
+              </label>
               <input
                 type="date"
                 value={filterDate}
