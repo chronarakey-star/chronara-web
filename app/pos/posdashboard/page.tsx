@@ -27,6 +27,16 @@ interface Employee {
   store_id?: string;
 }
 
+interface PosTill {
+  id: string;
+  company_id: string;
+  store_id: string;
+  name: string;
+  is_default: number | boolean;
+  is_active: number | boolean;
+  sort_order: number | null;
+}
+
 // ============================================================================
 // 2. MAIN COMPONENT & STATE
 // ============================================================================
@@ -39,7 +49,12 @@ export default function POSDashboard() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [employee, setEmployee] = useState<Employee | null>(null);
   const [storeId, setStoreId] = useState<string>("");
-  const [companyId, setCompanyId] = useState<string>(""); 
+  const [companyId, setCompanyId] = useState<string>("");
+
+  // Till / register selected for this browser.
+  const [availableTills, setAvailableTills] = useState<PosTill[]>([]);
+  const [tillId, setTillId] = useState<string>("");
+  const [tillName, setTillName] = useState<string>("");
 
   // Module Navigation State
   const [activeModule, setActiveModule] = useState<string>("Sell");
@@ -58,6 +73,17 @@ export default function POSDashboard() {
         localStorage.removeItem('chronara_web_user');
         localStorage.removeItem('chronara_last_store');
         localStorage.removeItem('chronara_theme_color');
+
+        // Till assignments use company/store-specific keys.
+        // Remove any saved web till assignments when this POS
+        // authentication context is no longer valid.
+        Object.keys(localStorage)
+          .filter(key =>
+            key.startsWith('chronara_web_till_')
+          )
+          .forEach(key =>
+            localStorage.removeItem(key)
+          );
       };
 
       const cachedStore =
@@ -217,6 +243,86 @@ export default function POSDashboard() {
           );
         }
 
+        // ------------------------------------------------------------
+        // Load active tills for this store and restore this browser's
+        // saved till assignment.
+        // ------------------------------------------------------------
+        let resolvedTillId = "";
+        let resolvedTillName = "";
+        let resolvedTills: PosTill[] = [];
+
+        if (validStoreId) {
+          const { data: tillRows, error: tillsError } =
+            await supabase
+              .from('pos_tills')
+              .select(
+                'id, company_id, store_id, name, is_default, is_active, sort_order'
+              )
+              .eq('company_id', company.id)
+              .eq('store_id', validStoreId)
+              .eq('is_active', 1)
+              .neq('is_deleted', true)
+              .order('is_default', {
+                ascending: false
+              })
+              .order('sort_order', {
+                ascending: true
+              })
+              .order('name', {
+                ascending: true
+              });
+
+          if (tillsError) {
+            throw tillsError;
+          }
+
+          resolvedTills = (
+            tillRows || []
+          ) as PosTill[];
+
+          const tillStorageKey =
+            `chronara_web_till_${company.id}_${validStoreId}`;
+
+          const cachedTillId =
+            localStorage.getItem(
+              tillStorageKey
+            ) || "";
+
+          const cachedTill = resolvedTills.find(
+            till => till.id === cachedTillId
+          );
+
+          const defaultTill = resolvedTills.find(
+            till =>
+              till.is_default === true
+              || Number(till.is_default) === 1
+          );
+
+          const selectedTill =
+            cachedTill
+            || defaultTill
+            || resolvedTills[0]
+            || null;
+
+          if (selectedTill) {
+            resolvedTillId = selectedTill.id;
+            resolvedTillName = selectedTill.name;
+
+            localStorage.setItem(
+              tillStorageKey,
+              selectedTill.id
+            );
+          } else {
+            localStorage.removeItem(
+              tillStorageKey
+            );
+          }
+        }
+
+        setAvailableTills(resolvedTills);
+        setTillId(resolvedTillId);
+        setTillName(resolvedTillName);
+
         const { data: empData, error: employeeError } =
           await supabase
             .from('employees')
@@ -286,6 +392,38 @@ export default function POSDashboard() {
   }, [autoLogoutEnabled, router]);
 
 
+  const handleTillChange = (
+    selectedTillId: string
+  ) => {
+    const selectedTill = availableTills.find(
+      till => till.id === selectedTillId
+    );
+
+    if (
+      !selectedTill
+      || !companyId
+      || !storeId
+    ) {
+      return;
+    }
+
+    setTillId(selectedTill.id);
+    setTillName(selectedTill.name);
+
+    const tillStorageKey =
+      `chronara_web_till_${companyId}_${storeId}`;
+
+    localStorage.setItem(
+      tillStorageKey,
+      selectedTill.id
+    );
+
+    // Clear an in-progress cross-module refund when the till changes.
+    // A refund should begin and finish under one explicitly selected till.
+    setRefundData(null);
+  };
+
+
   const handleSignOut = () => {
     localStorage.removeItem('chronara_web_user');
     router.push("/pos");
@@ -313,9 +451,20 @@ export default function POSDashboard() {
               className="object-contain" 
             />
           </div>
-          <h2 style={{ color: themeColor }} className="text-xl font-medium italic truncate w-full text-center">
-            {employee ? employee.first_name : (currentUser ? currentUser.username : "Staff")}
+          <h2
+            style={{ color: themeColor }}
+            className="text-xl font-medium italic truncate w-full text-center"
+          >
+            {employee
+              ? employee.first_name
+              : (
+                  currentUser
+                    ? currentUser.username
+                    : "Staff"
+                )}
           </h2>
+
+
         </div>
 
         {/* --- POS LITE NAVIGATION --- */}
@@ -356,7 +505,7 @@ export default function POSDashboard() {
 
         </div>
 
-        <div className="space-y-1 pb-4 pt-2 border-t border-gray-800">
+        <div className="space-y-1 pb-3 pt-2 border-t border-gray-800">
           <button 
             onClick={() => setActiveModule("Cash Management")}
             style={{ color: activeModule === 'Cash Management' ? themeColor : '#e5e7eb' }}
@@ -372,6 +521,46 @@ export default function POSDashboard() {
           >
             Open/Close
           </button>
+        </div>
+
+        <div className="px-4 pb-4">
+          <label
+            htmlFor="web-till-selector"
+            className="block text-[10px] font-bold uppercase tracking-[0.16em] text-gray-500 mb-1.5"
+          >
+            Current Till
+          </label>
+
+          {availableTills.length > 0 ? (
+            <select
+              id="web-till-selector"
+              value={tillId}
+              onChange={event =>
+                handleTillChange(
+                  event.target.value
+                )
+              }
+              className="w-full h-10 rounded-md bg-[#292929] border border-gray-700 px-2.5 text-[13px] font-bold text-white outline-none cursor-pointer"
+              style={{
+                borderColor: tillId
+                  ? themeColor
+                  : undefined
+              }}
+            >
+              {availableTills.map(till => (
+                <option
+                  key={till.id}
+                  value={till.id}
+                >
+                  {till.name}
+                </option>
+              ))}
+            </select>
+          ) : (
+            <div className="w-full min-h-10 rounded-md bg-[#292929] border border-red-900/70 px-2.5 py-2.5 text-[12px] font-bold text-red-400">
+              No active till
+            </div>
+          )}
         </div>
 
         <div className="p-4 pt-0">
@@ -391,14 +580,18 @@ export default function POSDashboard() {
         <div className="flex-1 flex items-center justify-center overflow-hidden">
           
           {activeModule === "Sell" && (
-            <SellModule 
-              companyId={companyId} 
-              storeId={storeId} 
-              themeColor={themeColor} 
-              user={currentUser} 
+            <SellModule
+              companyId={companyId}
+              storeId={storeId}
+              tillId={tillId}
+              tillName={tillName}
+              themeColor={themeColor}
+              user={currentUser}
               setActiveModule={setActiveModule}
               refundData={refundData}
-              clearRefundData={() => setRefundData(null)}
+              clearRefundData={() =>
+                setRefundData(null)
+              }
             />
           )}
 
@@ -412,11 +605,13 @@ export default function POSDashboard() {
           )}
 
           {activeModule === "Sales" && (
-            <SalesModule 
-              companyId={companyId} 
-              storeId={storeId} 
-              themeColor={themeColor} 
-              user={currentUser} 
+            <SalesModule
+              companyId={companyId}
+              storeId={storeId}
+              tillId={tillId}
+              tillName={tillName}
+              themeColor={themeColor}
+              user={currentUser}
               onInitiateRefund={(data) => {
                 setRefundData(data);
                 setActiveModule("Sell");
@@ -434,21 +629,25 @@ export default function POSDashboard() {
           )}
 
           {activeModule === "Cash Management" && (
-            <CashManagementModule 
-              companyId={companyId} 
-              storeId={storeId} 
-              themeColor={themeColor} 
-              user={currentUser} 
+            <CashManagementModule
+              companyId={companyId}
+              storeId={storeId}
+              tillId={tillId}
+              tillName={tillName}
+              themeColor={themeColor}
+              user={currentUser}
               setActiveModule={setActiveModule}
             />
           )}
 
           {activeModule === "Open/Close" && (
-            <OpenCloseModule 
-              companyId={companyId} 
-              storeId={storeId} 
-              themeColor={themeColor} 
-              user={currentUser} 
+            <OpenCloseModule
+              companyId={companyId}
+              storeId={storeId}
+              tillId={tillId}
+              tillName={tillName}
+              themeColor={themeColor}
+              user={currentUser}
               setActiveModule={setActiveModule}
             />
           )}

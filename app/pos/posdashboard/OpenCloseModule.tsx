@@ -6,6 +6,8 @@ import { supabase } from "../../../utils/supabase";
 interface OpenCloseProps {
   companyId: string;
   storeId: string;
+  tillId: string;
+  tillName: string;
   themeColor: string;
   user: any;
   setActiveModule: (module: string) => void;
@@ -89,7 +91,15 @@ const getDefaultProvincialTaxCode = (province?: string) => {
     return "Exempt";
 };
 
-export default function OpenCloseModule({ companyId, storeId, themeColor, user, setActiveModule }: OpenCloseProps) {
+export default function OpenCloseModule({
+  companyId,
+  storeId,
+  tillId,
+  tillName,
+  themeColor,
+  user,
+  setActiveModule
+}: OpenCloseProps) {
   const [isLoading, setIsLoading] = useState(true);
   const [isSaving, setIsSaving] = useState(false);
   const [storeName, setStoreName] = useState("");
@@ -115,9 +125,23 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
   const [notes, setNotes] = useState("");
 
   // Success Modal
-  const [showSuccess, setShowSuccess] = useState(false);
-  const [successHeader, setSuccessHeader] = useState("");
-  const [successBody, setSuccessBody] = useState("");
+  const [showSuccess, setShowSuccess] =
+    useState(false);
+
+  const [successHeader, setSuccessHeader] =
+    useState("");
+
+  const [successBody, setSuccessBody] =
+    useState("");
+
+  // Read-only web warning. Repairs remain available only in the
+  // official Chronara Key desktop application.
+  const [
+    managementReviewType,
+    setManagementReviewType
+  ] = useState<
+    "duplicate" | "update" | null
+  >(null);
 
   // Keep Ref synced with actual state so the heartbeat always knows what screen we are looking at
   useEffect(() => {
@@ -127,10 +151,28 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
   // --- INITIALIZATION ---
   useEffect(() => {
     loadSessionData();
-  }, [companyId, storeId]);
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
 
   const loadSessionData = async () => {
     setIsLoading(true);
+
+    if (
+      !companyId
+      || !storeId
+      || !tillId
+    ) {
+      setSessionType("Open");
+      setLastOpenTimestamp(0);
+      setExpectedCash(0);
+      setExpectedNonCash({});
+      setIsLoading(false);
+      return;
+    }
+
     try {
       // 1. Fetch Store Name, Province, & Company Config
       let sName = storeId === "ALL_STORES" ? "All Stores" : storeId;
@@ -191,15 +233,45 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
       setNonCashInputs(initNC);
 
       // 2. Determine Session Type (Open vs Close)
-      const { data: lastSession } = await supabase
+      let lastSessionQuery = supabase
         .from('cash_sessions')
-        .select('type, timestamp, total')
+        .select(
+          'type, timestamp, total'
+        )
         .eq('company_id', companyId)
-        .eq('store_id', storeId === "ALL_STORES" ? null : storeId)
+        .eq('till_id', tillId)
         .in('type', ['Open', 'Close'])
         .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
+        .order('timestamp', {
+          ascending: false
+        })
         .limit(1);
+
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        lastSessionQuery =
+          lastSessionQuery.eq(
+            'store_id',
+            storeId
+          );
+      } else {
+        lastSessionQuery =
+          lastSessionQuery.is(
+            'store_id',
+            null
+          );
+      }
+
+      const {
+        data: lastSession,
+        error: lastSessionError
+      } = await lastSessionQuery;
+
+      if (lastSessionError) {
+        throw lastSessionError;
+      }
 
       let currentType: "Open" | "Close" = "Open";
       let ts = 0;
@@ -217,9 +289,20 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
       setLastOpenTimestamp(ts);
 
       // 3. Calculate Expectations if Closing
-      if (currentType === "Close" && ts > 0) {
-         await calculateExpectations(ts, openingFloat, methods);
+      if (
+        currentType === "Close"
+        && ts > 0
+      ) {
+        await calculateExpectations(
+          ts,
+          openingFloat,
+          methods
+        );
       }
+
+      // The web app only displays management notices.
+      // Resolution remains in the desktop application.
+      await checkForManagementReview();
 
     } catch (err) {
       console.error("Failed to load session data:", err);
@@ -236,42 +319,117 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
 
     const pingCloudStatus = async () => {
       try {
+        if (!tillId) {
+          return;
+        }
+
         let query = supabase
           .from('cash_sessions')
           .select('type')
           .eq('company_id', companyId)
+          .eq('till_id', tillId)
           .in('type', ['Open', 'Close'])
           .neq('is_deleted', true)
-          .order('timestamp', { ascending: false })
+          .order('timestamp', {
+            ascending: false
+          })
           .limit(1);
 
-        if (storeId && storeId !== "ALL_STORES") {
-          query = query.eq('store_id', storeId);
+        if (
+          storeId
+          && storeId !== "ALL_STORES"
+        ) {
+          query = query.eq(
+            'store_id',
+            storeId
+          );
         } else {
-          query = query.is('store_id', null);
+          query = query.is(
+            'store_id',
+            null
+          );
         }
 
         const { data, error } = await query;
-        if (error) throw error;
 
-        if (data && data.length > 0) {
-          const remoteLastType = data[0].type;
-          const expectedNextAction = remoteLastType === "Open" ? "Close" : "Open";
-          
-          // If the cloud says we should be looking at a different screen, instantly reload!
-          if (expectedNextAction !== sessionTypeRef.current) {
-            console.log("State mismatch detected by heartbeat. Syncing...");
-            loadSessionData();
-          }
+        if (error) {
+          throw error;
+        }
+
+        const remoteLastType =
+          data && data.length > 0
+            ? data[0].type
+            : null;
+
+        const expectedNextAction:
+          "Open" | "Close" =
+          remoteLastType === "Open"
+            ? "Close"
+            : "Open";
+
+        if (
+          expectedNextAction
+          !== sessionTypeRef.current
+        ) {
+          console.log(
+            "Till state mismatch detected. Syncing..."
+          );
+
+          loadSessionData();
         }
       } catch (err) {
-        // Silently fail if network drops temporarily
+        // Silently fail if network drops temporarily.
       }
     };
 
-    const intervalId = setInterval(pingCloudStatus, 15000);
-    return () => clearInterval(intervalId); // Cleanup on dismount
-  }, [companyId, storeId]);
+    const intervalId =
+      setInterval(
+        pingCloudStatus,
+        15000
+      );
+
+    return () =>
+      clearInterval(intervalId);
+
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
+
+
+  // Periodically check whether management must review duplicate
+  // closes or update a past till report in the desktop program.
+  useEffect(() => {
+    if (
+      !companyId
+      || !storeId
+    ) {
+      return;
+    }
+
+    const refreshManagementNotice =
+      () => {
+        checkForManagementReview();
+      };
+
+    refreshManagementNotice();
+
+    const intervalId =
+      setInterval(
+        refreshManagementNotice,
+        60000
+      );
+
+    return () =>
+      clearInterval(intervalId);
+
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
+
   // ==========================================
 
   const fetchAll = async (query: any) => {
@@ -293,6 +451,621 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
     return allData;
   };
 
+  const parseDenominations = (
+    rawValue: any
+  ): Record<string, any> => {
+    if (
+      rawValue
+      && typeof rawValue === "object"
+      && !Array.isArray(rawValue)
+    ) {
+      return rawValue;
+    }
+
+    if (
+      typeof rawValue === "string"
+      && rawValue.trim()
+    ) {
+      try {
+        const parsed =
+          JSON.parse(rawValue);
+
+        if (
+          parsed
+          && typeof parsed === "object"
+          && !Array.isArray(parsed)
+        ) {
+          return parsed;
+        }
+      } catch {
+        // Invalid or legacy JSON is treated as empty.
+      }
+    }
+
+    return {};
+  };
+
+
+  const parseStoredNumber = (
+    value: any
+  ): number => {
+    if (
+      value === null
+      || value === undefined
+    ) {
+      return 0;
+    }
+
+    if (typeof value === "number") {
+      return Number.isFinite(value)
+        ? value
+        : 0;
+    }
+
+    const parsed = parseFloat(
+      String(value).replace(
+        /[^0-9.-]+/g,
+        ""
+      )
+    );
+
+    return Number.isFinite(parsed)
+      ? parsed
+      : 0;
+  };
+
+
+  const checkForManagementReview =
+    async () => {
+      if (
+        !companyId
+        || !storeId
+      ) {
+        setManagementReviewType(null);
+        return;
+      }
+
+      try {
+        let sessionQuery = supabase
+          .from("cash_sessions")
+          .select(
+            "id, type, timestamp, total, expected_cash, denominations, till_id, store_id"
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .in(
+            "type",
+            ["Open", "Close"]
+          )
+          .neq(
+            "is_deleted",
+            true
+          )
+          .not(
+            "till_id",
+            "is",
+            null
+          )
+          .order(
+            "till_id",
+            {
+              ascending: true
+            }
+          )
+          .order(
+            "timestamp",
+            {
+              ascending: true
+            }
+          );
+
+        if (
+          storeId
+          && storeId !== "ALL_STORES"
+        ) {
+          sessionQuery =
+            sessionQuery.eq(
+              "store_id",
+              storeId
+            );
+        } else {
+          sessionQuery =
+            sessionQuery.is(
+              "store_id",
+              null
+            );
+        }
+
+        const sessionRows =
+          await fetchAll(
+            sessionQuery
+          );
+
+        const rowsByTill =
+          new Map<string, any[]>();
+
+        for (const row of sessionRows) {
+          const rowTillId =
+            String(
+              row.till_id
+              || ""
+            ).trim();
+
+          if (!rowTillId) {
+            continue;
+          }
+
+          const existing =
+            rowsByTill.get(
+              rowTillId
+            ) || [];
+
+          existing.push(row);
+
+          rowsByTill.set(
+            rowTillId,
+            existing
+          );
+        }
+
+        const duplicateCloseIds =
+          new Set<string>();
+
+        const closedShifts: Array<{
+          tillId: string;
+          open: any;
+          close: any;
+        }> = [];
+
+        let hasDuplicate = false;
+
+        for (
+          const [
+            rowTillId,
+            tillRows
+          ] of rowsByTill.entries()
+        ) {
+          let currentOpen: any = null;
+          let currentCloses: any[] = [];
+
+          const finishCurrentShift = () => {
+            if (!currentOpen) {
+              return;
+            }
+
+            if (
+              currentCloses.length > 1
+            ) {
+              hasDuplicate = true;
+
+              currentCloses.forEach(
+                closeRow => {
+                  if (closeRow.id) {
+                    duplicateCloseIds.add(
+                      String(closeRow.id)
+                    );
+                  }
+                }
+              );
+            } else if (
+              currentCloses.length === 1
+            ) {
+              closedShifts.push({
+                tillId: rowTillId,
+                open: currentOpen,
+                close: currentCloses[0]
+              });
+            }
+          };
+
+          for (const row of tillRows) {
+            if (row.type === "Open") {
+              finishCurrentShift();
+
+              currentOpen = row;
+              currentCloses = [];
+
+            } else if (
+              row.type === "Close"
+              && currentOpen
+            ) {
+              currentCloses.push(row);
+            }
+          }
+
+          finishCurrentShift();
+        }
+
+        // Duplicate structural conflicts take priority over ordinary
+        // report updates, matching the desktop application.
+        if (hasDuplicate) {
+          setManagementReviewType(
+            "duplicate"
+          );
+          return;
+        }
+
+        // Only desktop Closes explicitly marked as saved offline can
+        // require the Update Past Till Reports workflow.
+        const offlineShifts =
+          closedShifts
+            .filter(shift => {
+              const denominations =
+                parseDenominations(
+                  shift.close
+                    .denominations
+                );
+
+              return Boolean(
+                denominations[
+                  "_chronara_offline_action"
+                ]
+              );
+            })
+            .slice(0, 250);
+
+        for (
+          const shift of offlineShifts
+        ) {
+          if (
+            duplicateCloseIds.has(
+              String(
+                shift.close.id
+                || ""
+              )
+            )
+          ) {
+            continue;
+          }
+
+          const openTimestamp =
+            parseStoredNumber(
+              shift.open.timestamp
+            );
+
+          const closeTimestamp =
+            parseStoredNumber(
+              shift.close.timestamp
+            );
+
+          if (
+            openTimestamp <= 0
+            || closeTimestamp <= 0
+          ) {
+            continue;
+          }
+
+          const sinceIso =
+            new Date(
+              openTimestamp * 1000
+            ).toISOString();
+
+          const closeIso =
+            new Date(
+              closeTimestamp * 1000
+            ).toISOString();
+
+          let salesQuery = supabase
+            .from("sales")
+            .select(
+              "id, total"
+            )
+            .eq(
+              "company_id",
+              companyId
+            )
+            .eq(
+              "till_id",
+              shift.tillId
+            )
+            .gte(
+              "date",
+              sinceIso
+            )
+            .lte(
+              "date",
+              closeIso
+            )
+            .neq(
+              "is_deleted",
+              true
+            );
+
+          if (
+            storeId
+            && storeId !== "ALL_STORES"
+          ) {
+            salesQuery =
+              salesQuery.eq(
+                "store_id",
+                storeId
+              );
+          } else {
+            salesQuery =
+              salesQuery.is(
+                "store_id",
+                null
+              );
+          }
+
+          const sales =
+            await fetchAll(
+              salesQuery
+            );
+
+          const saleIds =
+            sales
+              .map(sale => sale.id)
+              .filter(Boolean);
+
+          const payments: any[] = [];
+
+          for (
+            let index = 0;
+            index < saleIds.length;
+            index += 100
+          ) {
+            const idChunk =
+              saleIds.slice(
+                index,
+                index + 100
+              );
+
+            const chunkPayments =
+              await fetchAll(
+                supabase
+                  .from(
+                    "sale_payments"
+                  )
+                  .select(
+                    "method, amount"
+                  )
+                  .eq(
+                    "company_id",
+                    companyId
+                  )
+                  .in(
+                    "sale_id",
+                    idChunk
+                  )
+                  .neq(
+                    "is_deleted",
+                    true
+                  )
+              );
+
+            payments.push(
+              ...chunkPayments
+            );
+          }
+
+          let activityQuery = supabase
+            .from("cash_sessions")
+            .select("total")
+            .eq(
+              "company_id",
+              companyId
+            )
+            .eq(
+              "till_id",
+              shift.tillId
+            )
+            .gte(
+              "timestamp",
+              openTimestamp
+            )
+            .lte(
+              "timestamp",
+              closeTimestamp
+            )
+            .in(
+              "type",
+              [
+                "Add Cash",
+                "Remove Cash"
+              ]
+            )
+            .neq(
+              "is_deleted",
+              true
+            );
+
+          if (
+            storeId
+            && storeId !== "ALL_STORES"
+          ) {
+            activityQuery =
+              activityQuery.eq(
+                "store_id",
+                storeId
+              );
+          } else {
+            activityQuery =
+              activityQuery.is(
+                "store_id",
+                null
+              );
+          }
+
+          const cashActivity =
+            await fetchAll(
+              activityQuery
+            );
+
+          let currentCashSales = 0;
+          const currentNonCash:
+            Record<string, number> = {};
+
+          for (const payment of payments) {
+            const method =
+              String(
+                payment.method
+                || ""
+              ).trim();
+
+            const amount =
+              parseStoredNumber(
+                payment.amount
+              );
+
+            if (
+              method.toLowerCase()
+              === "cash"
+            ) {
+              currentCashSales += amount;
+            } else if (method) {
+              currentNonCash[method] =
+                (
+                  currentNonCash[
+                    method
+                  ] || 0
+                ) + amount;
+            }
+          }
+
+          const activityTotal =
+            cashActivity.reduce(
+              (
+                total,
+                activity
+              ) =>
+                total
+                + parseStoredNumber(
+                    activity.total
+                  ),
+              0
+            );
+
+          const currentExpectedCash =
+            parseStoredNumber(
+              shift.open.total
+            )
+            + currentCashSales
+            + activityTotal;
+
+          const savedExpectedCash =
+            parseStoredNumber(
+              shift.close
+                .expected_cash
+            );
+
+          const denominations =
+            parseDenominations(
+              shift.close
+                .denominations
+            );
+
+          const savedNonCash:
+            Record<string, number> = {};
+
+          Object.entries(
+            denominations
+          ).forEach(
+            ([key, value]) => {
+              if (
+                !key.endsWith(
+                  "_Expected"
+                )
+              ) {
+                return;
+              }
+
+              const method =
+                key.slice(
+                  0,
+                  -9
+                );
+
+              if (method) {
+                savedNonCash[
+                  method
+                ] =
+                  parseStoredNumber(
+                    value
+                  );
+              }
+            }
+          );
+
+          const allMethods =
+            new Set([
+              ...Object.keys(
+                currentNonCash
+              ),
+              ...Object.keys(
+                savedNonCash
+              )
+            ]);
+
+          const terminalChanged =
+            Array.from(
+              allMethods
+            ).some(method =>
+              Math.abs(
+                (
+                  currentNonCash[
+                    method
+                  ] || 0
+                )
+                -
+                (
+                  savedNonCash[
+                    method
+                  ] || 0
+                )
+              ) > 0.005
+            );
+
+          const savedSourceCount =
+            denominations[
+              "_chronara_source_sale_count"
+            ];
+
+          let sourceCountChanged =
+            false;
+
+          if (
+            savedSourceCount
+            !== undefined
+            && savedSourceCount
+            !== null
+          ) {
+            sourceCountChanged =
+              Number(
+                savedSourceCount
+              ) !== sales.length;
+          }
+
+          const cashChanged =
+            Math.abs(
+              currentExpectedCash
+              - savedExpectedCash
+            ) > 0.005;
+
+          if (
+            cashChanged
+            || terminalChanged
+            || sourceCountChanged
+          ) {
+            setManagementReviewType(
+              "update"
+            );
+            return;
+          }
+        }
+
+        setManagementReviewType(null);
+
+      } catch (error) {
+        // Do not display a false warning when the check itself fails.
+        console.error(
+          "Could not check till reports requiring management review:",
+          error
+        );
+      }
+    };
   const calculateExpectations = async (sinceTs: number, openingFloat: number, currentMethods: string[]) => {
     try {
       const sinceStr = new Date(sinceTs * 1000).toISOString();
@@ -309,8 +1082,12 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         .from("cash_sessions")
         .select("total")
         .eq("company_id", companyId)
+        .eq("till_id", tillId)
         .gte("timestamp", sinceTs)
-        .in("type", ["Add Cash", "Remove Cash"])
+        .in(
+          "type",
+          ["Add Cash", "Remove Cash"]
+        )
         .neq("is_deleted", true);
 
       if (targetStoreId) dropsQuery = dropsQuery.eq("store_id", targetStoreId);
@@ -323,6 +1100,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         .from("sales")
         .select("id")
         .eq("company_id", companyId)
+        .eq("till_id", tillId)
         .gte("date", sinceStr)
         .neq("is_deleted", true);
 
@@ -397,17 +1175,40 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
     // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
     // =======================================================
     try {
+      if (!tillId) {
+        alert(
+          "Select an active till before opening or closing."
+        );
+        setIsSaving(false);
+        return;
+      }
+
       let query = supabase
         .from('cash_sessions')
         .select('type')
         .eq('company_id', companyId)
+        .eq('till_id', tillId)
         .in('type', ['Open', 'Close'])
         .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
+        .order('timestamp', {
+          ascending: false
+        })
         .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
-      else query = query.is('store_id', null);
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          'store_id',
+          storeId
+        );
+      } else {
+        query = query.is(
+          'store_id',
+          null
+        );
+      }
 
       const { data: preSaveData, error: preSaveError } = await query;
       if (!preSaveError && preSaveData && preSaveData.length > 0) {
@@ -416,7 +1217,9 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         
         if (expectedNextAction !== sessionTypeRef.current) {
             const msgAction = cloudLastType === "Open" ? "opened" : "closed";
-            alert(`Conflict: Store is already ${msgAction} on another device.\nThe screen will now refresh.`);
+            alert(
+              `Conflict: ${tillName || "The selected till"} is already ${msgAction} on another device.\nThe screen will now refresh.`
+            );
             setIsSaving(false);
             loadSessionData();
             return; 
@@ -491,14 +1294,20 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
       }
 
       // 1. Save Cash Session (Always runs)
-      const { error: sessionError } = await supabase.from('cash_sessions').insert([{
-         id: sessionId,
-         date: nowIso, 
-         timestamp: nowTs,
-         type: sessionType,
-         company_id: companyId,
-         store_id: targetStoreId,
-         user: user?.username || "Unknown",
+      const { error: sessionError } =
+        await supabase
+          .from('cash_sessions')
+          .insert([{
+            id: sessionId,
+            date: nowIso,
+            timestamp: nowTs,
+            type: sessionType,
+            company_id: companyId,
+            store_id: targetStoreId,
+            till_id: tillId,
+            user:
+              user?.username
+              || "Unknown",
          total: currentCashTotal,
          expected_cash: sessionType === "Close" ? expectedCash : 0,
          variance: sessionType === "Close" ? cashVariance : 0,
@@ -518,8 +1327,11 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
           
           let shiftSalesQuery = supabase
             .from("sales")
-            .select("id, total, tax_val, prov_tax_val")
+            .select(
+              "id, total, tax_val, prov_tax_val"
+            )
             .eq("company_id", companyId)
+            .eq("till_id", tillId)
             .gte("date", sinceIso)
             .lte("date", nowIso)
             .neq("is_deleted", true);
@@ -790,18 +1602,25 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
           const varStr = totalVariance > 0 ? `+$${totalVariance.toFixed(2)}` : `-$${Math.abs(totalVariance).toFixed(2)}`;
           const jeDesc = Math.abs(totalVariance) > 0.01 ? `End of Day Z-Report (Variance: ${varStr})` : "End of Day Z-Report (Balanced)";
 
-          const { error: jeError } = await supabase.from('journal_entries').insert([{
-              id: jeId,
-              company_id: companyId,
-              store_id: targetStoreId,
-              date: nowIso, 
-              type: 'Z-Report',
-              ref_number: sessionId,
-              total_amount: grossSales, 
-              description: jeDesc,
-              created_at: nowIso, 
-              username: user?.username || "System"
-          }]);
+          const { error: jeError } =
+            await supabase
+              .from('journal_entries')
+              .insert([{
+                id: jeId,
+                company_id: companyId,
+                store_id: targetStoreId,
+                till_id: tillId,
+                date: nowIso,
+                type: 'Z-Report',
+                ref_number: sessionId,
+                total_amount: grossSales,
+                description:
+                  `${jeDesc} — ${tillName || "Till"}`,
+                created_at: nowIso,
+                username:
+                  user?.username
+                  || "System"
+              }]);
           if (jeError) throw new Error(`Failed to create Journal Entry: ${jeError.message}`);
 
           const lines: any[] = [];
@@ -892,12 +1711,37 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
           else if (totalVariance > 0) addLine('Cash Over/Short', 0.0, totalVariance);
 
           if (lines.length > 0) {
-             const { error: jlError } = await supabase.from('journal_lines').insert(lines);
-             if (jlError) throw new Error(`Failed to map Journal Lines: ${jlError.message}`);
+            const { error: jlError } =
+              await supabase
+                .from('journal_lines')
+                .insert(lines);
 
-             const jeTotalDr = lines.reduce((sum, l) => sum + l.debit, 0);
-             const { error: jeUpdateError } = await supabase.from('journal_entries').update({ total_amount: jeTotalDr }).eq('id', jeId);
-             if (jeUpdateError) throw new Error(`Failed to index Journal Totals: ${jeUpdateError.message}`);
+            if (jlError) {
+              throw new Error(
+                `Failed to map Journal Lines: ${jlError.message}`
+              );
+            }
+
+            // The visible Z-report amount must remain gross customer
+            // sales. Do not replace it with total journal debits,
+            // because those debits may also include COGS, commissions,
+            // inventory adjustments, and variance lines.
+            const { error: jeUpdateError } =
+              await supabase
+                .from('journal_entries')
+                .update({
+                  total_amount: grossSales
+                })
+                .eq('id', jeId)
+                .eq('company_id', companyId)
+                .eq('store_id', targetStoreId)
+                .eq('till_id', tillId);
+
+            if (jeUpdateError) {
+              throw new Error(
+                `Failed to index Journal Totals: ${jeUpdateError.message}`
+              );
+            }
           }
       }
       // ==========================================
@@ -929,7 +1773,10 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         description: fullLogDesc,
       }]);
 
-      let msg = `Till ${sessionType}ed successfully on ${localDisplayTime}.`;
+      let msg =
+        `${tillName || "Till"} was `
+        + `${sessionType === "Open" ? "opened" : "closed"} `
+        + `successfully on ${localDisplayTime}.`;
       if (sessionType === "Close") {
          const stat = isBalanced ? "BALANCED" : (cashVariance > 0 ? "OVER" : "UNDER");
          msg += `\n\n--- CASH RECONCILIATION ---`;
@@ -947,7 +1794,13 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
       }
       msg += `\n${detailsText}`;
 
-      setSuccessHeader(`Session Saved Successfully`);
+      setSuccessHeader(
+        `${tillName || "Till"} ${
+          sessionType === "Open"
+            ? "Opened"
+            : "Closed"
+        } Successfully`
+      );
       setSuccessBody(msg);
       setShowSuccess(true);
 
@@ -970,7 +1823,9 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
       <!DOCTYPE html>
       <html>
       <head>
-        <title>Z-Report - ${storeName}</title>
+        <title>
+          Z-Report - ${storeName} - ${tillName || "Till"}
+        </title>
         <style>
           @media print {
             @page { margin: 0; }
@@ -1006,6 +1861,7 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
         <div class="title">Z-REPORT SUMMARY</div>
         <div class="header-info">
           <div>Store: ${storeName}</div>
+          <div>Till: ${tillName || "Unknown Till"}</div>
           <div>User: ${user?.username || "Unknown"}</div>
         </div>
         <div class="content">${successBody}</div>
@@ -1140,16 +1996,36 @@ export default function OpenCloseModule({ companyId, storeId, themeColor, user, 
             />
          </div>
 
-         <div className="mt-8 mb-10 w-[400px]">
+         <div className="mt-8 mb-5 w-[400px]">
             <button 
               onClick={handleSave}
               disabled={isSaving}
               style={{ backgroundColor: themeColor }}
               className="w-full py-4 rounded-xl text-white font-bold text-[16px] tracking-widest uppercase transition-transform active:scale-95 shadow-lg disabled:opacity-50 hover:brightness-110"
             >
-              {isSaving ? "SAVING..." : `CONFIRM ${sessionType === "Close" ? 'CLOSING' : 'OPENING'} BALANCE`}
+              {isSaving
+                ? "SAVING..."
+                : `CONFIRM ${
+                    sessionType === "Close"
+                      ? "CLOSING"
+                      : "OPENING"
+                  } BALANCE`}
             </button>
          </div>
+
+         {managementReviewType && (
+           <div className="w-full max-w-[850px] mb-10 px-6 text-center">
+             <p className="text-orange-400 text-[13px] font-semibold leading-relaxed">
+               {managementReviewType === "duplicate"
+                 ? (
+                     "Management attention required: Duplicate till closing records must be reviewed and approved in the official Chronara Key desktop application."
+                   )
+                 : (
+                     "Management attention required: One or more past till reports require updating in the official Chronara Key desktop application."
+                   )}
+             </p>
+           </div>
+         )}
 
       </div>
 

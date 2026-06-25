@@ -7,9 +7,13 @@ import { supabase } from "../../../utils/supabase";
 interface CashManagementProps {
   companyId: string;
   storeId: string;
+  tillId: string;
+  tillName: string;
   themeColor: string;
   user: any;
-  setActiveModule?: (module: string) => void; // Added so the "Open Till Now" button works
+  setActiveModule?: (
+    module: string
+  ) => void;
 }
 
 interface CashDrop {
@@ -19,6 +23,7 @@ interface CashDrop {
   type: string;
   company_id: string;
   store_id: string;
+  till_id: string;
   user: string;
   total: number;
   notes: string;
@@ -40,7 +45,15 @@ const getStoreTimezone = (province: string, isAllStores: boolean) => {
     return map[province?.toUpperCase()] || Intl.DateTimeFormat().resolvedOptions().timeZone;
 };
 
-export default function CashManagementModule({ companyId, storeId, themeColor, user, setActiveModule }: CashManagementProps) {
+export default function CashManagementModule({
+  companyId,
+  storeId,
+  tillId,
+  tillName,
+  themeColor,
+  user,
+  setActiveModule
+}: CashManagementProps) {
   // --- STATE ---
   const [drops, setDrops] = useState<CashDrop[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -100,38 +113,93 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
   useEffect(() => {
     fetchLookups();
     checkStoreStatus();
-  }, [companyId, storeId]);
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
 
   const checkStoreStatus = async () => {
-    if (!companyId) return;
+    if (
+      !companyId
+      || !storeId
+      || !tillId
+    ) {
+      setIsStoreOpen(false);
+      return;
+    }
+
     try {
       let query = supabase
         .from('cash_sessions')
         .select('type')
         .eq('company_id', companyId)
-        .in('type', ['Open', 'Close'])
+        .eq('till_id', tillId)
+        .in(
+          'type',
+          ['Open', 'Close']
+        )
         .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
+        .order(
+          'timestamp',
+          {
+            ascending: false
+          }
+        )
         .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") query = query.eq('store_id', storeId);
-      else query = query.is('store_id', null);
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          'store_id',
+          storeId
+        );
+      } else {
+        query = query.is(
+          'store_id',
+          null
+        );
+      }
 
-      const { data, error } = await query;
-      if (error) throw error;
+      const { data, error } =
+        await query;
 
-      if (data && data.length > 0) setIsStoreOpen(data[0].type === "Open");
-      else setIsStoreOpen(false);
+      if (error) {
+        throw error;
+      }
+
+      setIsStoreOpen(
+        Boolean(
+          data
+          && data.length > 0
+          && data[0].type === "Open"
+        )
+      );
+
     } catch (err) {
-      console.error("Failed to check store status", err);
+      console.error(
+        "Failed to check till status",
+        err
+      );
+
       setIsStoreOpen(false);
     }
   };
 
   useEffect(() => {
     setPage(1);
+    lastKnownCountRef.current = null;
     fetchDrops(1);
-  }, [companyId, storeId, filterType, filterUser, filterDate]); // Re-fetch on filter change
+  }, [
+    companyId,
+    storeId,
+    tillId,
+    filterType,
+    filterUser,
+    filterDate
+  ]);
 
   useEffect(() => {
     if (page > 1) fetchDrops(page);
@@ -155,26 +223,112 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
     const pingCloudStatus = async () => {
       try {
-        // 1. Check Store Lock Status
-        let sessionQuery = supabase.from('cash_sessions').select('type').eq('company_id', companyId).in('type', ['Open', 'Close']).neq('is_deleted', true).order('timestamp', { ascending: false }).limit(1);
-        if (storeId && storeId !== "ALL_STORES") sessionQuery = sessionQuery.eq('store_id', storeId);
-        else sessionQuery = sessionQuery.is('store_id', null);
+        // 1. Check the selected till's Open/Closed state.
+        if (!tillId) {
+          setIsStoreOpen(false);
+          return;
+        }
 
-        const { data: sessionData } = await sessionQuery;
-        if (sessionData && sessionData.length > 0) {
-          const cloudIsOpen = sessionData[0].type === "Open";
-          if (cloudIsOpen !== isStoreOpenRef.current) setIsStoreOpen(cloudIsOpen);
+        let sessionQuery = supabase
+          .from('cash_sessions')
+          .select('type')
+          .eq('company_id', companyId)
+          .eq('till_id', tillId)
+          .in(
+            'type',
+            ['Open', 'Close']
+          )
+          .neq('is_deleted', true)
+          .order(
+            'timestamp',
+            {
+              ascending: false
+            }
+          )
+          .limit(1);
+
+        if (
+          storeId
+          && storeId !== "ALL_STORES"
+        ) {
+          sessionQuery =
+            sessionQuery.eq(
+              'store_id',
+              storeId
+            );
+        } else {
+          sessionQuery =
+            sessionQuery.is(
+              'store_id',
+              null
+            );
+        }
+
+        const {
+          data: sessionData,
+          error: sessionError
+        } = await sessionQuery;
+
+        if (sessionError) {
+          throw sessionError;
+        }
+
+        const cloudIsOpen = Boolean(
+          sessionData
+          && sessionData.length > 0
+          && sessionData[0].type === "Open"
+        );
+
+        if (
+          cloudIsOpen
+          !== isStoreOpenRef.current
+        ) {
+          setIsStoreOpen(cloudIsOpen);
         }
 
         // 2. Check Session Count for live list updates
         let query = supabase
           .from("cash_sessions")
-          .select("id", { count: "exact", head: true }) 
-          .eq("company_id", companyId)
-          .neq("is_deleted", true);
+          .select(
+            "id",
+            {
+              count: "exact",
+              head: true
+            }
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .eq(
+            "till_id",
+            tillId
+          )
+          .in(
+            "type",
+            [
+              "Add Cash",
+              "Remove Cash"
+            ]
+          )
+          .neq(
+            "is_deleted",
+            true
+          );
 
-        if (storeId && storeId !== "ALL_STORES") {
-          query = query.eq("store_id", storeId);
+        if (
+          storeId
+          && storeId !== "ALL_STORES"
+        ) {
+          query = query.eq(
+            "store_id",
+            storeId
+          );
+        } else {
+          query = query.is(
+            "store_id",
+            null
+          );
         }
 
         const { count, error } = await query;
@@ -201,7 +355,16 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
 
     const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
-  }, [companyId, storeId, page, filterType, filterUser, filterDate, searchQuery]);
+  }, [
+    companyId,
+    storeId,
+    tillId,
+    page,
+    filterType,
+    filterUser,
+    filterDate,
+    searchQuery
+  ]);
   // ==========================================
   
   // --- DATA FETCHING ---
@@ -231,20 +394,65 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
     }
   };
 
-  const fetchDrops = async (targetPage: number, showLoadingScreen: boolean = true) => {
-    if (!companyId) return;
-    if (showLoadingScreen) setIsLoading(true);
+  const fetchDrops = async (
+    targetPage: number,
+    showLoadingScreen: boolean = true
+  ) => {
+    if (
+      !companyId
+      || !storeId
+      || !tillId
+    ) {
+      setDrops([]);
+      setTotalCount(0);
+
+      if (showLoadingScreen) {
+        setIsLoading(false);
+      }
+
+      return;
+    }
+
+    if (showLoadingScreen) {
+      setIsLoading(true);
+    }
 
     try {
       let query = supabase
         .from("cash_sessions")
-        .select("*", { count: "exact" })
-        .eq("company_id", companyId)
-        .neq("is_deleted", true); // <--- HIDE DELETED ROWS ON THE WEB
+        .select(
+          "*",
+          {
+            count: "exact"
+          }
+        )
+        .eq(
+          "company_id",
+          companyId
+        )
+        .eq(
+          "till_id",
+          tillId
+        )
+        .neq(
+          "is_deleted",
+          true
+        );
 
       // Only filter by current store if we aren't in Admin/All Stores mode
-      if (storeId && storeId !== "ALL_STORES") {
-        query = query.eq("store_id", storeId);
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          "store_id",
+          storeId
+        );
+      } else {
+        query = query.is(
+          "store_id",
+          null
+        );
       }
 
       // Type Filter
@@ -329,9 +537,30 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
     }
   };
 
-  const processSave = async (actionType: "Add Cash" | "Remove Cash") => {
-    const amountVal = parseFloat(dropAmount);
-    const reasonVal = dropReason.trim();
+  const processSave = async (
+    actionType:
+      | "Add Cash"
+      | "Remove Cash"
+  ) => {
+    if (!tillId) {
+      alert(
+        "Select an active till before managing cash."
+      );
+      return;
+    }
+
+    if (isStoreOpen !== true) {
+      alert(
+        `${tillName || "The selected till"} is closed. Open it before managing cash.`
+      );
+      return;
+    }
+
+    const amountVal =
+      parseFloat(dropAmount);
+
+    const reasonVal =
+      dropReason.trim();
 
     if (isNaN(amountVal) || amountVal <= 0) {
       alert("Amount must be greater than 0");
@@ -361,42 +590,60 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
             total: finalAmount,
             notes: reasonVal,
             type: actionType,
-            date: dateStr, 
-            timestamp: unixTs
+            date: dateStr,
+            timestamp: unixTs,
+            till_id: tillId
           })
-          .eq("id", editRecord.id);
+          .eq(
+            "id",
+            editRecord.id
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .eq(
+            "till_id",
+            tillId
+          );
 
         if (error) throw error;
 
         // Activity Log
         await logActivity(
           actionType,
-          `Updated Cash: ${finalAmount.toFixed(2)} (${actionType})`,
+          `Updated Cash: ${finalAmount.toFixed(2)} (${actionType}) — ${tillName || "Till"}`,
           dateStr.split("T")[0] // Split on T for standard date formats
         );
       } else {
         // INSERT
         const newId = `drop_${crypto.randomUUID().replace(/-/g, "")}`;
-        const { error } = await supabase.from("cash_sessions").insert([{
-          id: newId,
-          date: dateStr,
-          timestamp: unixTs,
-          type: actionType,
-          company_id: companyId,
-          store_id: targetStoreId,
-          user: user?.username || "Unknown",
-          total: finalAmount,
-          notes: reasonVal,
-          expected_cash: 0,
-          variance: 0,
-        }]);
+        const { error } =
+          await supabase
+            .from("cash_sessions")
+            .insert([{
+              id: newId,
+              date: dateStr,
+              timestamp: unixTs,
+              type: actionType,
+              company_id: companyId,
+              store_id: targetStoreId,
+              till_id: tillId,
+              user:
+                user?.username
+                || "Unknown",
+              total: finalAmount,
+              notes: reasonVal,
+              expected_cash: 0,
+              variance: 0
+            }]);
 
         if (error) throw error;
 
         // Activity Log
         await logActivity(
           actionType,
-          `New Cash: ${finalAmount.toFixed(2)} (${actionType})`,
+          `New Cash: ${finalAmount.toFixed(2)} (${actionType}) — ${tillName || "Till"}`,
           dateStr.split("T")[0]
         );
       }
@@ -423,17 +670,33 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
       const unixTs = Math.floor(now.getTime() / 1000);
 
       // 2. THE FIX: Soft delete AND bump the timestamp forward so Python catches it!
-      const { error } = await supabase
-        .from("cash_sessions")
-        .update({ is_deleted: true, date: dateStr, timestamp: unixTs }) 
-        .eq("id", editRecord.id);
+      const { error } =
+        await supabase
+          .from("cash_sessions")
+          .update({
+            is_deleted: true,
+            date: dateStr,
+            timestamp: unixTs
+          })
+          .eq(
+            "id",
+            editRecord.id
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .eq(
+            "till_id",
+            tillId
+          );
 
       if (error) throw error;
 
       // Activity Log
       await logActivity(
         "Delete Cash Log",
-        `Deleted record amount: ${editRecord.total.toFixed(2)}`,
+        `Deleted record amount: ${editRecord.total.toFixed(2)} — ${tillName || "Till"}`,
         dateStr.split("T")[0]
       );
 
@@ -481,8 +744,13 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
             <path strokeLinecap="round" strokeLinejoin="round" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
 
-          <h2 className="text-[34px] font-bold text-gray-400 mb-3 tracking-wide">Register is Currently Closed</h2>
-          <p className="text-gray-500 text-[17px] mb-10 font-medium">Store is closed, open the store to manage cash.</p>
+          <h2 className="text-[34px] font-bold text-gray-400 mb-3 tracking-wide">
+            {tillName || "Selected Till"} Is Closed
+          </h2>
+
+          <p className="text-gray-500 text-[17px] mb-10 font-medium text-center">
+            Open this till before adding or removing cash.
+          </p>
           
           {setActiveModule && (
               <button
@@ -504,7 +772,26 @@ export default function CashManagementModule({ companyId, storeId, themeColor, u
     <div className="flex h-full w-full bg-[#181818] relative flex-col font-sans">
       {/* --- HEADER --- */}
       <div className="bg-[#1e1e1e] p-6 border-b border-gray-800 shrink-0">
-        <h1 className="text-3xl font-bold text-white mb-6">Cash Management History</h1>
+        <div className="flex items-end justify-between mb-6">
+          <h1 className="text-3xl font-bold text-white">
+            Cash Management History
+          </h1>
+
+          <div className="text-right">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+              Current Till
+            </div>
+
+            <div
+              className="text-[16px] font-bold"
+              style={{
+                color: themeColor
+              }}
+            >
+              {tillName || "No Till Selected"}
+            </div>
+          </div>
+        </div>
 
         <div className="flex flex-col gap-4">
           {/* Search Bar Row */}

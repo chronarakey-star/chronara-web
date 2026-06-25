@@ -7,6 +7,8 @@ import { supabase } from "../../../utils/supabase";
 interface SellModuleProps {
   companyId: string;
   storeId: string;
+  tillId: string;
+  tillName: string;
   themeColor: string;
   user: any;
   setActiveModule: (module: string) => void;
@@ -191,6 +193,7 @@ const printWebReceipt = (
             <div class="center">${receiptData.date}</div>
             <div class="center">${receiptData.time}</div>
             <div class="center">Invoice #: ${String(receiptData.sale_id).slice(-6)}</div>
+            ${receiptData.till_name ? `<div class="center">Till: ${receiptData.till_name}</div>` : ''}
             <div class="center">Served by: ${receiptData.cashier}</div>
             ${receiptData.customer && receiptData.customer !== 'Guest' ? `<div class="center">Customer: ${receiptData.customer}</div>` : ''}
             
@@ -403,7 +406,17 @@ const sendReceiptEmail = async (
     }
 };
 
-export default function SellModule({ companyId, storeId, themeColor, user, setActiveModule, refundData, clearRefundData }: SellModuleProps) {
+export default function SellModule({
+  companyId,
+  storeId,
+  tillId,
+  tillName,
+  themeColor,
+  user,
+  setActiveModule,
+  refundData,
+  clearRefundData
+}: SellModuleProps) {
 
   // --- STATE ---
   const [rawConfig, setRawConfig] = useState<any>(null);
@@ -591,37 +604,73 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     fetchProducts();
     fetchCustomers();
     checkStoreStatus();
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [companyId, storeId, selectedCategories]);
+  }, [
+    companyId,
+    storeId,
+    tillId,
+    selectedCategories
+  ]);
 
   const checkStoreStatus = async () => {
-    if (!companyId) return;
+    if (
+      !companyId
+      || !storeId
+      || !tillId
+    ) {
+      setIsStoreOpen(false);
+      return;
+    }
+
     try {
       let query = supabase
         .from('cash_sessions')
         .select('type')
         .eq('company_id', companyId)
+        .eq('till_id', tillId)
         .in('type', ['Open', 'Close'])
         .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
+        .order('timestamp', {
+          ascending: false
+        })
         .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") {
-        query = query.eq('store_id', storeId);
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          'store_id',
+          storeId
+        );
       } else {
-        query = query.is('store_id', null);
+        query = query.is(
+          'store_id',
+          null
+        );
       }
 
       const { data, error } = await query;
-      if (error) throw error;
 
-      if (data && data.length > 0) {
-        setIsStoreOpen(data[0].type === "Open");
-      } else {
-        setIsStoreOpen(false); // Default to closed if no records exist
+      if (error) {
+        throw error;
       }
+
+      setIsStoreOpen(
+        Boolean(
+          data
+          && data.length > 0
+          && data[0].type === "Open"
+        )
+      );
+
     } catch (err) {
-      console.error("Failed to check store status", err);
+      console.error(
+        "Failed to check till status",
+        err
+      );
+
       setIsStoreOpen(false);
     }
   };
@@ -641,24 +690,58 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
     const pingCloudStatus = async () => {
       try {
         // 1. Check Store Status (Lock / Unlock)
+        if (!tillId) {
+          setIsStoreOpen(false);
+          return;
+        }
+
         let sessionQuery = supabase
           .from('cash_sessions')
           .select('type')
           .eq('company_id', companyId)
+          .eq('till_id', tillId)
           .in('type', ['Open', 'Close'])
           .neq('is_deleted', true)
-          .order('timestamp', { ascending: false })
+          .order('timestamp', {
+            ascending: false
+          })
           .limit(1);
-          
-        if (storeId && storeId !== "ALL_STORES") sessionQuery = sessionQuery.eq('store_id', storeId);
-        else sessionQuery = sessionQuery.is('store_id', null);
 
-        const { data: sessionData } = await sessionQuery;
-        if (sessionData && sessionData.length > 0) {
-          const cloudIsOpen = sessionData[0].type === "Open";
-          if (cloudIsOpen !== isStoreOpenRef.current) {
-            setIsStoreOpen(cloudIsOpen);
-          }
+        if (
+          storeId
+          && storeId !== "ALL_STORES"
+        ) {
+          sessionQuery = sessionQuery.eq(
+            'store_id',
+            storeId
+          );
+        } else {
+          sessionQuery = sessionQuery.is(
+            'store_id',
+            null
+          );
+        }
+
+        const {
+          data: sessionData,
+          error: sessionError
+        } = await sessionQuery;
+
+        if (sessionError) {
+          throw sessionError;
+        }
+
+        const cloudIsOpen = Boolean(
+          sessionData
+          && sessionData.length > 0
+          && sessionData[0].type === "Open"
+        );
+
+        if (
+          cloudIsOpen
+          !== isStoreOpenRef.current
+        ) {
+          setIsStoreOpen(cloudIsOpen);
         }
 
         // 2. Check Global Activity Log for Data Changes (Products, Customers)
@@ -687,7 +770,11 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
 
     const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
-  }, [companyId, storeId]);
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
   // ==========================================
 
   // --- REFUND SESSION INITIALIZATION ---
@@ -1066,10 +1153,14 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       twoDaysAgo.setDate(twoDaysAgo.getDate() - 2);
       const twoDaysAgoUTC = twoDaysAgo.toISOString();
 
-      let salesQuery = supabase.from('sales')
-        .select('id, total, user_id, date')
+      let salesQuery = supabase
+        .from('sales')
+        .select(
+          'id, total, user_id, date'
+        )
         .eq('company_id', companyId)
-        .gte('date', twoDaysAgoUTC) // Greater than 48 hours ago
+        .eq('till_id', tillId)
+        .gte('date', twoDaysAgoUTC)
         .neq('is_deleted', true);
         
       if (sid) salesQuery = salesQuery.eq('store_id', sid);
@@ -1136,12 +1227,17 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       }
 
       // 6. Fetch Opening Balance from Cash Sessions
-      let openQuery = supabase.from('cash_sessions')
+      let openQuery = supabase
+        .from('cash_sessions')
         .select('total, timestamp')
         .eq('company_id', companyId)
+        .eq('till_id', tillId)
         .eq('type', 'Open')
         .gte('timestamp', twoDaysAgoUTC)
-        .order('timestamp', { ascending: false });
+        .neq('is_deleted', true)
+        .order('timestamp', {
+          ascending: false
+        });
         
       if (sid) openQuery = openQuery.eq('store_id', sid);
 
@@ -1786,12 +1882,29 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       total_val: totals.total
     };
 
+    if (!tillId) {
+      await customAlert(
+        "Till Required",
+        "Select an active till before parking a sale."
+      );
+      return;
+    }
+
     const parkData = {
-      id: `PARK_${crypto.randomUUID().replace(/-/g, '').substring(0, 16)}`,
+      id: `PARK_${crypto
+        .randomUUID()
+        .replace(/-/g, '')
+        .substring(0, 16)}`,
       company_id: companyId,
-      store_id: storeId === "ALL_STORES" ? null : storeId,
+      store_id:
+        storeId === "ALL_STORES"
+          ? null
+          : storeId,
+      till_id: tillId,
       user_id: user?.id,
-      customer_json: customer ? JSON.stringify(customer) : null,
+      customer_json: customer
+        ? JSON.stringify(customer)
+        : null,
       cart_json: JSON.stringify(cart),
       meta_json: JSON.stringify(meta),
       timestamp: nowStr
@@ -1809,22 +1922,62 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
   };
 
   const handleRecallClick = async () => {
+    if (!tillId) {
+      await customAlert(
+        "Till Required",
+        "Select an active till before recalling parked sales."
+      );
+      return;
+    }
+
     try {
-      // THE FIX: Added .neq('is_deleted', true) so we don't pull ghost sales!
-      let q = supabase.from('parked_sales')
+      let query = supabase
+        .from('parked_sales')
         .select('*')
         .eq('company_id', companyId)
-        .neq('is_deleted', true); 
-        
-      if (storeId && storeId !== "ALL_STORES") q = q.or(`store_id.eq.${storeId},store_id.is.null`);
-      
-      const { data, error } = await q.order('timestamp', { ascending: false });
-      if (error) throw error;
-      
+        .eq('till_id', tillId)
+        .neq('is_deleted', true);
+
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        query = query.eq(
+          'store_id',
+          storeId
+        );
+      } else {
+        query = query.is(
+          'store_id',
+          null
+        );
+      }
+
+      const { data, error } =
+        await query.order(
+          'timestamp',
+          {
+            ascending: false
+          }
+        );
+
+      if (error) {
+        throw error;
+      }
+
       setParkedSales(data || []);
       setShowRecallModal(true);
+
     } catch (err) {
-      console.error("Error fetching parked sales", err);
+      console.error(
+        "Error fetching parked sales",
+        err
+      );
+
+      await customAlert(
+        "Recall Error",
+        "The parked sales could not be loaded."
+      );
     }
   };
 
@@ -1878,26 +2031,67 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
       // =======================================================
       // --- PRE-SAVE CLOUD VERIFICATION (RACE CONDITION FIX) ---
       // =======================================================
+      if (!tillId) {
+        await customAlert(
+          "Till Required",
+          "Select an active till before completing this transaction."
+        );
+
+        setShowPayment(false);
+        return false;
+      }
+
       let sessionQuery = supabase
         .from('cash_sessions')
         .select('type')
         .eq('company_id', companyId)
+        .eq('till_id', tillId)
         .in('type', ['Open', 'Close'])
         .neq('is_deleted', true)
-        .order('timestamp', { ascending: false })
+        .order('timestamp', {
+          ascending: false
+        })
         .limit(1);
 
-      if (storeId && storeId !== "ALL_STORES") sessionQuery = sessionQuery.eq('store_id', storeId);
-      else sessionQuery = sessionQuery.is('store_id', null);
+      if (
+        storeId
+        && storeId !== "ALL_STORES"
+      ) {
+        sessionQuery = sessionQuery.eq(
+          'store_id',
+          storeId
+        );
+      } else {
+        sessionQuery = sessionQuery.is(
+          'store_id',
+          null
+        );
+      }
 
-      const { data: preSaveData } = await sessionQuery;
-      if (preSaveData && preSaveData.length > 0) {
-        if (preSaveData[0].type === "Close") {
-          alert("Transaction Aborted: The register was just closed on another device.");
-          setIsStoreOpen(false);
-          setShowPayment(false);
-          return false;
-        }
+      const {
+        data: preSaveData,
+        error: preSaveError
+      } = await sessionQuery;
+
+      if (preSaveError) {
+        throw preSaveError;
+      }
+
+      const selectedTillIsOpen = Boolean(
+        preSaveData
+        && preSaveData.length > 0
+        && preSaveData[0].type === "Open"
+      );
+
+      if (!selectedTillIsOpen) {
+        await customAlert(
+          "Transaction Aborted",
+          `${tillName || "The selected till"} is closed. Open it before completing a transaction.`
+        );
+
+        setIsStoreOpen(false);
+        setShowPayment(false);
+        return false;
       }
       // =======================================================
 
@@ -2259,8 +2453,9 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
         date: timestampStr, 
         total: finalSaleTotal,
         method: mainMethod,
-        user_id: user?.id || null, 
+        user_id: user?.id || null,
         store_id: finalStoreId,
+        till_id: tillId,
         company_id: companyId,
         customer: customer ? `${customer.first_name} ${customer.last_name}`.trim() : "Guest",
         is_refund_of: isRefundMode ? refundData.id : null,
@@ -2637,9 +2832,15 @@ export default function SellModule({ companyId, storeId, themeColor, user, setAc
           companyName: rawConfig?.companyName || "Our Store",
           sale_id: saleId,
           date: localDateStr,
-          time: localTimeStr, // Newly injected local time string
-          cashier: user?.username || user?.first_name || "Staff",
-          customer: customer ? `${customer.first_name} ${customer.last_name}` : "Guest",
+          time: localTimeStr,
+          till_name: tillName,
+          cashier:
+            user?.username
+            || user?.first_name
+            || "Staff",
+          customer: customer
+            ? `${customer.first_name} ${customer.last_name}`
+            : "Guest",
           items: itemsToSave.map(i => ({ ...i, price: i.price + getItemSurcharge(i) })),
           subtotal: finalSubtotalToSave.toFixed(2),
           tax: (db_tax_val + db_prov_tax_val).toFixed(2),

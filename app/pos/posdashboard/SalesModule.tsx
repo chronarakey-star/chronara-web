@@ -7,9 +7,13 @@ import { supabase } from "../../../utils/supabase";
 interface SalesModuleProps {
   companyId: string;
   storeId: string;
+  tillId: string;
+  tillName: string;
   themeColor: string;
   user: any;
-  onInitiateRefund?: (saleData: any) => void;
+  onInitiateRefund?: (
+    saleData: any
+  ) => void;
 }
 
 interface Sale {
@@ -19,6 +23,7 @@ interface Sale {
   method: string;
   user_id: string;
   store_id: string;
+  till_id: string | null;
   customer: string;
   is_refund_of: string | null;
   tax_val: number;
@@ -150,6 +155,7 @@ const printWebReceipt = (
             <div class="center">Date: ${receiptData.date}</div>
             <div class="center">${receiptData.time}</div>
             <div class="center">Invoice #: ${String(receiptData.sale_id).slice(-6)}</div>
+            ${receiptData.till_name ? `<div class="center">Till: ${receiptData.till_name}</div>` : ''}
             <div class="center">Served by: ${receiptData.cashier}</div>
             ${receiptData.customer && receiptData.customer !== 'Guest' ? `<div class="center">Customer: ${receiptData.customer}</div>` : ''}
             
@@ -374,7 +380,15 @@ const sendReceiptEmail = async (
     }
 };
 
-export default function SalesModule({ companyId, storeId, themeColor, user, onInitiateRefund }: SalesModuleProps) {
+export default function SalesModule({
+  companyId,
+  storeId,
+  tillId,
+  tillName,
+  themeColor,
+  user,
+  onInitiateRefund
+}: SalesModuleProps) {
 // ... [REST OF YOUR SALES MODULE CODE REMAINS UNCHANGED] ...
   // --- STATE ---
   const [rawConfig, setRawConfig] = useState<any>(null);
@@ -382,8 +396,12 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   const [totalCount, setTotalCount] = useState(0);
   const [isLoading, setIsLoading] = useState(true);
 
-  // --- NEW: Heartbeat State Tracker ---
-  const lastKnownCountRef = useRef<number | null>(null);
+  // --- Heartbeat State Trackers ---
+  const lastKnownCountRef =
+    useRef<number | null>(null);
+
+  const [isTillOpen, setIsTillOpen] =
+    useState<boolean | null>(null);
 
   // Pagination & Filters
   const [page, setPage] = useState(1);
@@ -394,9 +412,17 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   const [filterDate, setFilterDate] = useState("");
 
   // Maps for ID -> Name lookup
-  const [storeMap, setStoreMap] = useState<Record<string, string>>({});
-  const [storeProvMap, setStoreProvMap] = useState<Record<string, string>>({}); // <--- NEW: Tracks provinces
-  const [userMap, setUserMap] = useState<Record<string, string>>({});
+  const [storeMap, setStoreMap] =
+    useState<Record<string, string>>({});
+
+  const [storeProvMap, setStoreProvMap] =
+    useState<Record<string, string>>({});
+
+  const [tillMap, setTillMap] =
+    useState<Record<string, string>>({});
+
+  const [userMap, setUserMap] =
+    useState<Record<string, string>>({});
 
 
 
@@ -419,6 +445,15 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
   useEffect(() => {
     fetchLookups();
   }, [companyId]);
+
+  useEffect(() => {
+    setIsTillOpen(null);
+    checkSelectedTillStatus();
+  }, [
+    companyId,
+    storeId,
+    tillId
+  ]);
 
   useEffect(() => {
     // Reset to page 1 if filters change
@@ -466,6 +501,42 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       });
       setStoreMap(sMap);
       setStoreProvMap(pMap);
+
+      // Fetch every till name for historical display.
+      // Do not filter inactive tills because old sales must retain
+      // the name of the till that originally processed them.
+      const {
+        data: tills,
+        error: tillError
+      } = await supabase
+        .from("pos_tills")
+        .select(
+          "id, name"
+        )
+        .eq(
+          "company_id",
+          companyId
+        );
+
+      if (tillError) {
+        console.error(
+          "Till fetch error:",
+          tillError
+        );
+      }
+
+      const tMap:
+        Record<string, string> = {};
+
+      tills?.forEach(till => {
+        if (till.id) {
+          tMap[till.id] =
+            till.name
+            || "Unknown Till";
+        }
+      });
+
+      setTillMap(tMap);
 
       // Auto-set the store filter to the user's current store if not global
       if (storeId && storeId !== "ALL_STORES" && sMap[storeId]) {
@@ -569,8 +640,20 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
         companyName: rawConfig?.companyName || "Our Store",
         sale_id: selectedSale.id,
         date: localDateStr,
-        time: localTimeStr, // <--- INJECTED LOCAL TIME
-        cashier: userMap[selectedSale.user_id] || selectedSale.user_id || "System",
+        time: localTimeStr,
+        till_name:
+          selectedSale.till_id
+            ? (
+                tillMap[
+                  selectedSale.till_id
+                ]
+                || "Unknown Till"
+              )
+            : "Legacy / Unassigned",
+        cashier:
+          userMap[selectedSale.user_id]
+          || selectedSale.user_id
+          || "System",
         customer: selectedSale.customer || "Guest",
         items: formattedItems,
         subtotal: calcSubtotal.toFixed(2),
@@ -660,7 +743,106 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
       setIsEmailingReceipt(false);
     }
   };
+  const checkSelectedTillStatus =
+    async (): Promise<boolean> => {
+      if (
+        !companyId
+        || !storeId
+      ) {
+        setIsTillOpen(false);
+        return false;
+      }
 
+      try {
+        let query = supabase
+          .from("cash_sessions")
+          .select(
+            "till_id, type, timestamp"
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .in(
+            "type",
+            ["Open", "Close"]
+          )
+          .neq(
+            "is_deleted",
+            true
+          )
+          .order(
+            "timestamp",
+            {
+              ascending: false
+            }
+          );
+
+        if (
+          storeId !== "ALL_STORES"
+        ) {
+          query = query.eq(
+            "store_id",
+            storeId
+          );
+        } else {
+          query = query.is(
+            "store_id",
+            null
+          );
+        }
+
+        const {
+          data,
+          error
+        } = await query;
+
+        if (error) {
+          throw error;
+        }
+
+        const latestStateByTill =
+          new Map<string, string>();
+
+        for (const session of data || []) {
+          const sessionTillId =
+            String(
+              session.till_id
+              || "LEGACY_UNASSIGNED"
+            );
+
+          if (
+            !latestStateByTill.has(
+              sessionTillId
+            )
+          ) {
+            latestStateByTill.set(
+              sessionTillId,
+              session.type
+            );
+          }
+        }
+
+        const storeIsOpen =
+          Array.from(
+            latestStateByTill.values()
+          ).some(
+            type => type === "Open"
+          );
+
+        setIsTillOpen(storeIsOpen);
+        return storeIsOpen;
+
+      } catch (error) {
+        console.error(
+          "Could not check store status:",
+          error
+        );
+
+        setIsTillOpen(false);
+        return false;
+      }
+    };
   // ==========================================
   // --- CLOUD HEARTBEAT ---
   // ==========================================
@@ -669,6 +851,8 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
     const pingCloudStatus = async () => {
       try {
+        await checkSelectedTillStatus();
+
         let query = supabase
           .from("sales")
           .select("id", { count: "exact", head: true })
@@ -698,7 +882,16 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
     const intervalId = setInterval(pingCloudStatus, 15000);
     return () => clearInterval(intervalId);
-  }, [companyId, filterStore, filterUser, filterDate, searchQuery, page]);
+  }, [
+    companyId,
+    storeId,
+    tillId,
+    filterStore,
+    filterUser,
+    filterDate,
+    searchQuery,
+    page
+  ]);
   // ==========================================
 
   const fetchSales = async (targetPage: number, showLoadingScreen: boolean = true) => {
@@ -1117,20 +1310,71 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
 
   };
 
-  const handleRefund = () => {
-    if (!selectedSale) return;
-    
-    // Package the parent sale with all child items and payments
+  const handleRefund = async () => {
+    if (!selectedSale) {
+      return;
+    }
+
+    if (!tillId) {
+      alert(
+        "Select an active till before starting a refund."
+      );
+      return;
+    }
+
+    const tillIsOpen =
+      await checkSelectedTillStatus();
+
+    if (!tillIsOpen) {
+      alert(
+        "The store is closed. Please open the store before processing a refund."
+      );
+      return;
+    }
+
+    const originalTillName =
+      selectedSale.till_id
+        ? (
+            tillMap[
+              selectedSale.till_id
+            ]
+            || "Unknown Till"
+          )
+        : "Legacy / Unassigned";
+
+    const confirmed =
+      window.confirm(
+        `Original sale till: ${originalTillName}\n`
+        + `Refund will be recorded on: ${tillName || "Selected Till"}\n\n`
+        + "Continue with this refund?"
+      );
+
+    if (!confirmed) {
+      return;
+    }
+
     const fullSaleData = {
       ...selectedSale,
-      items: saleItems,
-      payments: salePayments
+      original_till_name:
+        originalTillName,
+      refund_till_id:
+        tillId,
+      refund_till_name:
+        tillName,
+      items:
+        saleItems,
+      payments:
+        salePayments
     };
 
     if (onInitiateRefund) {
-      onInitiateRefund(fullSaleData);
+      onInitiateRefund(
+        fullSaleData
+      );
     } else {
-      alert("Refund routing is not connected to the parent dashboard.");
+      alert(
+        "Refund routing is not connected to the parent dashboard."
+      );
     }
   };
   // --- HELPERS ---
@@ -1172,7 +1416,26 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
     <div className="flex h-full w-full bg-[#181818] relative flex-col">
       {/* --- HEADER & CONTROLS --- */}
       <div className="bg-[#1e1e1e] p-6 border-b border-gray-800 shrink-0">
-        <h1 className="text-3xl font-bold text-white mb-6">Sales History</h1>
+        <div className="flex items-end justify-between mb-6">
+          <h1 className="text-3xl font-bold text-white">
+            Sales History
+          </h1>
+
+          <div className="text-right">
+            <div className="text-[10px] font-bold uppercase tracking-widest text-gray-500">
+              Refunds Process Through
+            </div>
+
+            <div
+              className="text-[16px] font-bold"
+              style={{
+                color: themeColor
+              }}
+            >
+              {tillName || "No Till Selected"}
+            </div>
+          </div>
+        </div>
 
         <div className="flex flex-col gap-4">
           {/* Search Bar */}
@@ -1251,11 +1514,29 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
         <div className="bg-[#1e1e1e] rounded-xl border border-gray-800 overflow-hidden shadow-lg">
           {/* Table Header */}
           <div className="flex bg-[#252525] p-4 border-b border-gray-800 text-[12px] font-bold text-gray-400 uppercase tracking-wider">
-            <div className="w-[120px]">Sale #</div>
-            <div className="w-[180px]">Date</div>
-            <div className="w-[120px]">User</div>
-            <div className="w-[150px]">Store</div>
-            <div className="flex-1">Customer</div>
+            <div className="w-[110px]">
+              Sale #
+            </div>
+
+            <div className="w-[175px]">
+              Date
+            </div>
+
+            <div className="w-[115px]">
+              User
+            </div>
+
+            <div className="w-[135px]">
+              Store
+            </div>
+
+            <div className="w-[120px]">
+              Till
+            </div>
+
+            <div className="flex-1">
+              Customer
+            </div>
             <div className="w-[100px] text-right">Total</div>
             <div className="w-[120px] text-center ml-4">Action</div>
           </div>
@@ -1273,11 +1554,60 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                   onDoubleClick={() => openSaleDetails(sale)}
                   className="flex items-center p-4 border-b border-gray-800 hover:bg-[#222222] transition-colors group cursor-pointer"
                 >
-                  <div className="w-[120px] font-bold text-gray-300 group-hover:text-white">{formatId(sale.id)}</div>
-                  <div className="w-[180px] text-[13px] text-gray-300">{getLocalDisplayTime(sale.date, sale.store_id)}</div>
-                  <div className="w-[120px] text-[14px] text-gray-300 truncate pr-4">{userMap[sale.user_id] || (sale.user_id === user?.id ? user?.username : sale.user_id) || "System"}</div>
-                  <div className="w-[150px] text-[14px] text-gray-300 truncate pr-4">{storeMap[sale.store_id] || sale.store_id || "Main Store"}</div>
-                  <div className="flex-1 text-[14px] text-gray-200 font-medium truncate pr-4">{sale.customer || "Guest"}</div>
+                  <div className="w-[110px] font-bold text-gray-300 group-hover:text-white">
+                    {formatId(sale.id)}
+                  </div>
+
+                  <div className="w-[175px] text-[13px] text-gray-300">
+                    {getLocalDisplayTime(
+                      sale.date,
+                      sale.store_id
+                    )}
+                  </div>
+
+                  <div className="w-[115px] text-[14px] text-gray-300 truncate pr-3">
+                    {userMap[sale.user_id]
+                      || (
+                        sale.user_id === user?.id
+                          ? user?.username
+                          : sale.user_id
+                      )
+                      || "System"}
+                  </div>
+
+                  <div className="w-[135px] text-[14px] text-gray-300 truncate pr-3">
+                    {storeMap[sale.store_id]
+                      || sale.store_id
+                      || "Main Store"}
+                  </div>
+
+                  <div
+                    className="w-[120px] text-[14px] font-bold truncate pr-3"
+                    style={{
+                      color: sale.till_id
+                        ? themeColor
+                        : "#6b7280"
+                    }}
+                    title={
+                      sale.till_id
+                        ? (
+                            tillMap[sale.till_id]
+                            || "Unknown Till"
+                          )
+                        : "Legacy / Unassigned"
+                    }
+                  >
+                    {sale.till_id
+                      ? (
+                          tillMap[sale.till_id]
+                          || "Unknown Till"
+                        )
+                      : "Unassigned"}
+                  </div>
+
+                  <div className="flex-1 text-[14px] text-gray-200 font-medium truncate pr-4">
+                    {sale.customer || "Guest"}
+                  </div>
                   <div
                     className="w-[100px] text-right font-bold text-[15px]"
                     style={{ color: sale.total < 0 ? "#C92C2C" : themeColor }}
@@ -1433,11 +1763,45 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                     <p className="text-[15px] text-white font-medium">{selectedSale.customer || "Guest"}</p>
                   </div>
                   <div className="flex-1 border-l border-gray-700 pl-6">
-                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">Store</p>
-                    <p className="text-[15px] text-white font-medium">{storeMap[selectedSale.store_id] || selectedSale.store_id || "Main Store"}</p>
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">
+                      Store
+                    </p>
+
+                    <p className="text-[15px] text-white font-medium">
+                      {storeMap[selectedSale.store_id]
+                        || selectedSale.store_id
+                        || "Main Store"}
+                    </p>
                   </div>
+
                   <div className="flex-1 border-l border-gray-700 pl-6">
-                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">User</p>
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">
+                      Original Till
+                    </p>
+
+                    <p
+                      className="text-[15px] font-bold"
+                      style={{
+                        color: selectedSale.till_id
+                          ? themeColor
+                          : "#6b7280"
+                      }}
+                    >
+                      {selectedSale.till_id
+                        ? (
+                            tillMap[
+                              selectedSale.till_id
+                            ]
+                            || "Unknown Till"
+                          )
+                        : "Legacy / Unassigned"}
+                    </p>
+                  </div>
+
+                  <div className="flex-1 border-l border-gray-700 pl-6">
+                    <p className="text-[11px] font-bold text-gray-500 uppercase tracking-wider mb-1">
+                      User
+                    </p>
                     <p className="text-[15px] text-white font-medium">{userMap[selectedSale.user_id] || (selectedSale.user_id === user?.id ? user?.username : selectedSale.user_id) || "System"}</p>
                   </div>
                 </div>
@@ -1514,17 +1878,44 @@ export default function SalesModule({ companyId, storeId, themeColor, user, onIn
                         </button>
                     ) : (
                         // It's a sale record -> Show Refund logic
-                        gcUsedLock || saleItems.filter(i => i.qty > 0 && (!String(i.sku || '').startsWith('SYS_') || i.price > 0)).length === 0 ? (
-                          <button disabled className="flex-1 py-4 bg-gray-800 text-gray-500 rounded font-bold uppercase tracking-wider cursor-not-allowed">
-                            REFUND LOCKED
+                        isTillOpen !== true ? (
+                          <div className="flex-1 flex items-center justify-center px-3">
+                            <p className="text-orange-400 text-[12px] italic font-semibold text-center leading-snug">
+                              Please open the store to process refunds
+                            </p>
+                          </div>
+                        ) : (
+                          gcUsedLock
+                          || saleItems.filter(
+                            item =>
+                              item.qty > 0
+                              && (
+                                !String(
+                                  item.sku || ""
+                                ).startsWith("SYS_")
+                                || item.price > 0
+                              )
+                          ).length === 0
+                        ) ? (
+                          <button
+                            disabled
+                            className="flex-1 py-4 bg-gray-800 text-gray-500 rounded font-bold uppercase tracking-wider cursor-not-allowed"
+                          >
+                            Refund Locked
                           </button>
                         ) : (
-                          <button
-                            onClick={handleRefund}
-                            className="flex-1 py-4 bg-[#C92C2C] hover:bg-[#8a1c1c] text-white rounded font-bold uppercase tracking-wider transition-colors shadow-lg"
-                          >
-                            REFUND
-                          </button>
+                          <div className="flex-1 flex flex-col gap-1.5">
+                            <div className="text-center text-[10px] font-bold uppercase tracking-wider text-gray-500">
+                              Refund to {tillName || "Selected Till"}
+                            </div>
+
+                            <button
+                              onClick={handleRefund}
+                              className="w-full py-4 bg-[#C92C2C] hover:bg-[#8a1c1c] text-white rounded font-bold uppercase tracking-wider transition-colors shadow-lg"
+                            >
+                              Refund
+                            </button>
+                          </div>
                         )
                     )}
                  </div>
