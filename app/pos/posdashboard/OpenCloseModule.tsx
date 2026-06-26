@@ -134,6 +134,11 @@ export default function OpenCloseModule({
   const [successBody, setSuccessBody] =
     useState("");
 
+  const [
+    showClosingSyncReminder,
+    setShowClosingSyncReminder
+  ] = useState(false);
+
   // Read-only web warning. Repairs remain available only in the
   // official Chronara Key desktop application.
   const [
@@ -146,6 +151,7 @@ export default function OpenCloseModule({
   // Keep Ref synced with actual state so the heartbeat always knows what screen we are looking at
   useEffect(() => {
     sessionTypeRef.current = sessionType;
+    setShowClosingSyncReminder(true);
   }, [sessionType]);
 
   // --- INITIALIZATION ---
@@ -1900,7 +1906,7 @@ export default function OpenCloseModule({
   }).format(new Date());
 
   return (
-    <div className="flex flex-col h-full w-full bg-[#181818] font-sans overflow-hidden">
+    <div className="relative flex flex-col h-full w-full bg-[#181818] font-sans overflow-hidden">
       
       <div className="p-8 pb-4 flex flex-col items-center">
          <h1 className="text-[28px] font-bold tracking-wide" style={{ color: themeColor }}>
@@ -2028,6 +2034,40 @@ export default function OpenCloseModule({
          )}
 
       </div>
+
+      {showClosingSyncReminder && (
+        <div className="absolute bottom-6 right-6 z-40 w-[390px] rounded-xl border border-orange-500/50 bg-[#202020] shadow-2xl">
+          <div className="flex items-start gap-3 p-5">
+            <div className="text-orange-400 text-[22px] leading-none">
+              ⚠
+            </div>
+
+            <div className="flex-1">
+              <p className="text-white text-[15px] font-bold">
+                Before Closing
+              </p>
+
+              <p className="mt-2 text-gray-300 text-[13px] leading-relaxed">
+                If any computer went offline today, make sure it has
+                reconnected and finished syncing before closing this till.
+                This helps ensure all sales and activity are included in
+                the final till report.
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() =>
+                setShowClosingSyncReminder(false)
+              }
+              className="text-gray-500 hover:text-white text-[20px] leading-none"
+              aria-label="Dismiss closing sync reminder"
+            >
+              ×
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* --- SUCCESS MODAL OVERLAY --- */}
       {showSuccess && (

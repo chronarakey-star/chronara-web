@@ -26,43 +26,84 @@ export default function Dashboard() {
       setUser(session.user);
 
       try {
-        // 2. Find the Company ID attached to this logged-in email
-        // Based on your Python schema, it's either in 'email' or 'owner_email'
-        const { data: companies, error: compError } = await supabase
-          .from('companies')
-          .select('id')
-          .or(`email.eq.${session.user.email},owner_email.eq.${session.user.email}`)
-          .limit(1);
+        const {
+          data: licenses,
+          error: licenseError,
+        } = await supabase.rpc(
+          "chronara_get_my_licenses"
+        );
 
-        if (companies && companies.length > 0) {
-          const companyId = companies[0].id;
+        if (licenseError) {
+          console.error(
+            "Dashboard licence lookup failed:",
+            {
+              message: licenseError.message,
+              details: licenseError.details,
+              hint: licenseError.hint,
+              code: licenseError.code,
+            }
+          );
 
-          // 3. Check the 'licenses' table for active keys claimed by this company
-          const { data: licenses, error: licError } = await supabase
-            .from('licenses')
-            .select('module, is_active')
-            .eq('claimed_by_company', companyId)
-            .eq('is_active', true);
+          setUnlockedModules({
+            POS: false,
+            CLOCK: false,
+          });
 
-          let activeStatus = { POS: false, CLOCK: false };
-
-          // 4. Parse the active licenses
-          if (licenses && licenses.length > 0) {
-            licenses.forEach((lic) => {
-              const mod = String(lic.module).toUpperCase();
-              if (mod.includes('SUITE')) {
-                activeStatus.POS = true;
-                activeStatus.CLOCK = true;
-              }
-              if (mod.includes('POS')) activeStatus.POS = true;
-              if (mod.includes('CLOCK')) activeStatus.CLOCK = true;
-            });
-          }
-          
-          setUnlockedModules(activeStatus);
+          return;
         }
+
+        const activeStatus = {
+          POS: false,
+          CLOCK: false,
+        };
+
+        if (Array.isArray(licenses)) {
+          licenses.forEach((license) => {
+            const isActive =
+              license.is_active === true ||
+              String(
+                license.is_active ?? ""
+              ).toLowerCase() === "true" ||
+              String(
+                license.is_active ?? ""
+              ) === "1";
+
+            if (!isActive) {
+              return;
+            }
+
+            const moduleName = String(
+              license.module ?? ""
+            )
+              .trim()
+              .toUpperCase();
+
+            if (moduleName.includes("SUITE")) {
+              activeStatus.POS = true;
+              activeStatus.CLOCK = true;
+            }
+
+            if (moduleName.includes("POS")) {
+              activeStatus.POS = true;
+            }
+
+            if (moduleName.includes("CLOCK")) {
+              activeStatus.CLOCK = true;
+            }
+          });
+        }
+
+        setUnlockedModules(activeStatus);
       } catch (error) {
-        console.error("Error validating licenses:", error);
+        console.error(
+          "Error validating licences:",
+          error
+        );
+
+        setUnlockedModules({
+          POS: false,
+          CLOCK: false,
+        });
       }
     };
 
@@ -70,8 +111,20 @@ export default function Dashboard() {
   }, [router]);
 
   const handleLogout = async () => {
-    await supabase.auth.signOut();
-    router.push("/");
+    const { error } = await supabase.auth.signOut({
+      scope: "local",
+    });
+
+    if (error) {
+      console.error(
+        "Logout failed:",
+        error
+      );
+    }
+
+    setUser(null);
+    router.replace("/");
+    router.refresh();
   };
 
   if (!user) return <div className="min-h-screen bg-[#0a0f16]"></div>;
@@ -91,7 +144,7 @@ export default function Dashboard() {
       </div>
 
       {/* Top Bar for Logout */}
-      <div className="absolute top-4 right-4 z-10">
+      <div className="absolute top-4 right-4 z-50">
         <button 
           onClick={handleLogout} 
           className="bg-transparent text-gray-400 hover:text-white px-4 py-2 text-sm font-bold transition-colors"
