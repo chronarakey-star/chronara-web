@@ -1064,26 +1064,183 @@ export default function SalesModule({
       return;
     }
 
-    // --- BLOCK DELETION IF GIFT CARD HAS BEEN USED ---
+    // --- BLOCK UNDO WHEN AN AFFECTED CARD HAS LATER ACTIVITY ---
+    const affectedGiftCards = new Set<string>();
+
     for (const item of saleItems) {
-        if (item.sku === 'SYS_GIFT_CARD' || item.sku?.toLowerCase().includes('gift_card')) {
-            try {
-                if (item.ingredients_snapshot) {
-                    const snap = JSON.parse(item.ingredients_snapshot);
-                    const rawCNum = snap.card_number;
-                    if (rawCNum) {
-                        const cNum = String(rawCNum).trim();
-                        const { data: gc } = await supabase.from('gift_cards').select('is_used').eq('company_id', companyId).eq('card_number', cNum).maybeSingle();
-                        if (gc && (gc.is_used === 1 || gc.is_used === true || String(gc.is_used) === "1")) {
-                            alert(`Cannot delete sale: Gift Card (*${cNum.slice(-4)}) has already been used.`);
-                            return;
-                        }
-                    }
-                }
-            } catch (e) {
-                console.error("Error checking GC status", e);
-            }
+      const isGiftCard =
+        item.sku === "SYS_GIFT_CARD"
+        || item.sku
+          ?.toLowerCase()
+          .includes("gift_card");
+
+      if (!isGiftCard) {
+        continue;
+      }
+
+      try {
+        const snapshot = JSON.parse(
+          item.ingredients_snapshot || "{}"
+        );
+
+        const cardNumber = String(
+          snapshot.card_number || ""
+        ).trim();
+
+        if (cardNumber) {
+          affectedGiftCards.add(
+            cardNumber
+          );
         }
+      } catch (error) {
+        console.error(
+          "Error reading gift card item:",
+          error
+        );
+      }
+    }
+
+    for (const payment of salePayments) {
+      const method = String(
+        payment.method || ""
+      ).trim().toLowerCase();
+
+      const cardNumber = String(
+        payment.payment_ref || ""
+      ).trim();
+
+      if (
+        method === "gift card"
+        && cardNumber
+      ) {
+        affectedGiftCards.add(
+          cardNumber
+        );
+      }
+    }
+
+    for (const cardNumber of affectedGiftCards) {
+      const { data: giftCard, error: cardError } =
+        await supabase
+          .from("gift_cards")
+          .select(
+            "is_used, initial_balance, current_balance"
+          )
+          .eq("company_id", companyId)
+          .eq("card_number", cardNumber)
+          .maybeSingle();
+
+      if (cardError) {
+        console.error(
+          "Error checking gift card:",
+          cardError
+        );
+        return;
+      }
+
+      if (giftCard) {
+        const { data: otherPayments, error: paymentError } =
+          await supabase
+            .from("sale_payments")
+            .select("sale_id")
+            .eq("company_id", companyId)
+            .ilike("method", "gift card")
+            .eq("payment_ref", cardNumber)
+            .neq("sale_id", selectedSale.id)
+            .or(
+              "is_deleted.is.null,is_deleted.eq.false"
+            );
+
+        if (paymentError) {
+          console.error(
+            "Error checking gift card transactions:",
+            paymentError
+          );
+          return;
+        }
+
+        const otherSaleIds = Array.from(
+          new Set(
+            (otherPayments || [])
+              .map(payment => payment.sale_id)
+              .filter(Boolean)
+          )
+        );
+
+        if (otherSaleIds.length > 0) {
+          const {
+            data: otherActiveSales,
+            error: otherSalesError
+          } = await supabase
+            .from("sales")
+            .select("id")
+            .eq("company_id", companyId)
+            .in("id", otherSaleIds)
+            .or(
+              "is_deleted.is.null,is_deleted.eq.false"
+            )
+            .limit(1);
+
+          if (otherSalesError) {
+            console.error(
+              "Error checking gift card sales:",
+              otherSalesError
+            );
+            return;
+          }
+
+          if (
+            otherActiveSales
+            && otherActiveSales.length > 0
+          ) {
+            alert(
+              "Unfortunately this transaction cannot be undone because "
+              + "the gift card was used in another transaction."
+            );
+            return;
+          }
+        }
+
+        const isUsed =
+          giftCard.is_used === true
+          || giftCard.is_used === 1
+          || String(
+            giftCard.is_used || "0"
+          ) === "1";
+
+        const initialBalance = Math.round(
+          parseFloat(
+            String(
+              giftCard.initial_balance || "0"
+            )
+          ) * 100
+        ) / 100;
+
+        const currentBalance = Math.round(
+          parseFloat(
+            String(
+              giftCard.current_balance || "0"
+            )
+          ) * 100
+        ) / 100;
+
+        const balanceHasChanged =
+          Math.abs(
+            initialBalance
+            - currentBalance
+          ) >= 0.01;
+
+        if (
+          isUsed
+          && balanceHasChanged
+        ) {
+          alert(
+            "Unfortunately this transaction cannot be undone because "
+            + "the gift card has already been used."
+          );
+          return;
+        }
+      }
     }
 
     if (!window.confirm(`Are you sure you want to delete Sale ${formatId(selectedSale.id)}? Inventory and records will be reversed.`)) {
@@ -1096,83 +1253,577 @@ export default function SalesModule({
       const timestampStr = new Date().toISOString();
 
       // --- REVERSE GIFT CARD LOADS ---
+      const originalSaleId = String(
+        selectedSale.is_refund_of || ""
+      ).trim();
+
+      const undoingRefund =
+        Boolean(originalSaleId);
+
+      const refundGiftCards =
+        new Map<string, number>();
+
       for (const item of saleItems) {
-          if (item.sku === 'SYS_GIFT_CARD' || item.sku?.toLowerCase().includes('gift_card')) {
-              try {
-                  if (item.ingredients_snapshot) {
-                      const snap = JSON.parse(item.ingredients_snapshot);
-                      const rawCNum = snap.card_number;
-                      if (rawCNum) {
-                          const cNum = String(rawCNum).trim();
-                          const loadAmt = (item.price || 0) * (item.qty || 1);
-                          
-                          const { data: gc } = await supabase.from('gift_cards').select('current_balance, initial_balance').eq('company_id', companyId).eq('card_number', cNum).maybeSingle();
-                          
-                          if (gc) {
-                              const currBal = parseFloat(gc.current_balance !== null ? gc.current_balance : "0");
-                              const initBal = parseFloat(gc.initial_balance !== null ? gc.initial_balance : "0");
-                              const newBal = currBal - loadAmt;
-                              
-                              if (newBal <= 0.001 && initBal <= (loadAmt + 0.001)) {
-                                  // Fully delete the card if it was only funded by this transaction and now empty
-                                  await supabase.from('gift_cards').delete().eq('company_id', companyId).eq('card_number', cNum);
-                              } else {
-                                  // Otherwise just reduce the balance
-                                  await supabase.from('gift_cards').update({ current_balance: newBal, updated_at: timestampStr }).eq('company_id', companyId).eq('card_number', cNum);
-                              }
-                          }
-                      }
-                  }
-              } catch (e) {
-                  console.error("GC Load Reversal Error", e);
-              }
+        const isGiftCard =
+          item.sku === "SYS_GIFT_CARD"
+          || item.sku
+            ?.toLowerCase()
+            .includes("gift_card");
+
+        if (!isGiftCard) {
+          continue;
+        }
+
+        try {
+          const snapshot = JSON.parse(
+            item.ingredients_snapshot || "{}"
+          );
+
+          const cardNumber = String(
+            snapshot.card_number || ""
+          ).trim();
+
+          if (!cardNumber) {
+            continue;
           }
+
+          const refundAmount = Math.abs(
+            parseFloat(
+              String(item.price || "0")
+            )
+            * parseFloat(
+              String(item.qty || "0")
+            )
+          );
+
+          refundGiftCards.set(
+            cardNumber,
+            refundAmount
+          );
+        } catch (error) {
+          console.error(
+            "Refund gift card read error:",
+            error
+          );
+        }
+      }
+
+      if (undoingRefund) {
+        const {
+          data: originalGiftCardItems,
+          error: originalItemsError
+        } = await supabase
+          .from("sale_items")
+          .select(
+            "qty, price, ingredients_snapshot"
+          )
+          .eq("company_id", companyId)
+          .eq("sale_id", originalSaleId)
+          .eq("sku", "SYS_GIFT_CARD")
+          .or(
+            "is_deleted.is.null,is_deleted.eq.false"
+          );
+
+        if (originalItemsError) {
+          throw originalItemsError;
+        }
+
+        for (
+          const originalItem
+          of originalGiftCardItems || []
+        ) {
+          try {
+            const snapshot = JSON.parse(
+              originalItem.ingredients_snapshot
+              || "{}"
+            );
+
+            const cardNumber = String(
+              snapshot.card_number || ""
+            ).trim();
+
+            if (!cardNumber) {
+              continue;
+            }
+
+            const originalBalance = Math.abs(
+              parseFloat(
+                String(
+                  originalItem.price || "0"
+                )
+              )
+              * parseFloat(
+                String(
+                  originalItem.qty || "1"
+                )
+              )
+            );
+
+            const refundBalance =
+              refundGiftCards.get(
+                cardNumber
+              ) || 0;
+
+            const restoredBalance =
+              refundBalance > 0.001
+                ? refundBalance
+                : originalBalance;
+
+            if (
+              restoredBalance <= 0.001
+            ) {
+              continue;
+            }
+
+            const {
+              data: existingCard,
+              error: cardLookupError
+            } = await supabase
+              .from("gift_cards")
+              .select("id")
+              .eq(
+                "company_id",
+                companyId
+              )
+              .eq(
+                "card_number",
+                cardNumber
+              )
+              .maybeSingle();
+
+            if (cardLookupError) {
+              throw cardLookupError;
+            }
+
+            if (existingCard) {
+              const { error: restoreError } =
+                await supabase
+                  .from("gift_cards")
+                  .update({
+                    store_id:
+                      selectedSale.store_id,
+                    initial_balance:
+                      originalBalance,
+                    current_balance:
+                      restoredBalance,
+                    status: "Active",
+                    is_used: 0,
+                    is_deleted: false,
+                    updated_at:
+                      timestampStr
+                  })
+                  .eq(
+                    "company_id",
+                    companyId
+                  )
+                  .eq(
+                    "card_number",
+                    cardNumber
+                  );
+
+              if (restoreError) {
+                throw restoreError;
+              }
+            } else {
+              const { error: insertError } =
+                await supabase
+                  .from("gift_cards")
+                  .insert([
+                    {
+                      id:
+                        `GC_${crypto
+                          .randomUUID()
+                          .replace(/-/g, "")
+                          .substring(0, 16)}`,
+                      company_id:
+                        companyId,
+                      store_id:
+                        selectedSale.store_id,
+                      card_number:
+                        cardNumber,
+                      initial_balance:
+                        originalBalance,
+                      current_balance:
+                        restoredBalance,
+                      status: "Active",
+                      is_used: 0,
+                      created_at:
+                        timestampStr,
+                      updated_at:
+                        timestampStr,
+                      is_deleted: false
+                    }
+                  ]);
+
+              if (insertError) {
+                throw insertError;
+              }
+            }
+          } catch (error) {
+            console.error(
+              "Gift card refund undo error:",
+              error
+            );
+            throw error;
+          }
+        }
+      } else {
+        for (const item of saleItems) {
+          const isGiftCard =
+            item.sku === "SYS_GIFT_CARD"
+            || item.sku
+              ?.toLowerCase()
+              .includes("gift_card");
+
+          if (!isGiftCard) {
+            continue;
+          }
+
+          try {
+            const snapshot = JSON.parse(
+              item.ingredients_snapshot || "{}"
+            );
+
+            const cardNumber = String(
+              snapshot.card_number || ""
+            ).trim();
+
+            if (!cardNumber) {
+              continue;
+            }
+
+            const loadAmount =
+              parseFloat(
+                String(item.price || "0")
+              )
+              * parseFloat(
+                String(item.qty || "1")
+              );
+
+            const {
+              data: giftCard,
+              error: giftCardError
+            } = await supabase
+              .from("gift_cards")
+              .select(
+                "current_balance, initial_balance"
+              )
+              .eq(
+                "company_id",
+                companyId
+              )
+              .eq(
+                "card_number",
+                cardNumber
+              )
+              .maybeSingle();
+
+            if (giftCardError) {
+              throw giftCardError;
+            }
+
+            if (!giftCard) {
+              continue;
+            }
+
+            const currentBalance =
+              parseFloat(
+                String(
+                  giftCard.current_balance
+                  || "0"
+                )
+              );
+
+            const initialBalance =
+              parseFloat(
+                String(
+                  giftCard.initial_balance
+                  || "0"
+                )
+              );
+
+            const newBalance =
+              currentBalance - loadAmount;
+
+            if (
+              newBalance <= 0.001
+              && initialBalance
+                <= loadAmount + 0.001
+            ) {
+              const { error: deleteError } =
+                await supabase
+                  .from("gift_cards")
+                  .delete()
+                  .eq(
+                    "company_id",
+                    companyId
+                  )
+                  .eq(
+                    "card_number",
+                    cardNumber
+                  );
+
+              if (deleteError) {
+                throw deleteError;
+              }
+            } else {
+              const { error: updateError } =
+                await supabase
+                  .from("gift_cards")
+                  .update({
+                    current_balance:
+                      newBalance,
+                    updated_at:
+                      timestampStr
+                  })
+                  .eq(
+                    "company_id",
+                    companyId
+                  )
+                  .eq(
+                    "card_number",
+                    cardNumber
+                  );
+
+              if (updateError) {
+                throw updateError;
+              }
+            }
+          } catch (error) {
+            console.error(
+              "GC Load Reversal Error:",
+              error
+            );
+            throw error;
+          }
+        }
       }
 
       // --- REVERSE GIFT CARD PAYMENTS ---
-      for (const p of salePayments) {
-          const methodStr = p.method ? String(p.method).trim().toLowerCase() : "";
-          
-          if (methodStr === "gift card" && p.payment_ref) {
-              const cNum = String(p.payment_ref).trim();
-              const payAmt = parseFloat(String(p.amount) || "0");
-              
-              // 1. Reverse balance
-              const { data: gc } = await supabase.from('gift_cards').select('current_balance').eq('company_id', companyId).eq('card_number', cNum).maybeSingle();
-              if (gc) {
-                  const currBal = parseFloat(gc.current_balance !== null ? gc.current_balance : "0");
-                  await supabase.from('gift_cards').update({
-                      current_balance: currBal + payAmt,
-                      updated_at: timestampStr
-                  }).eq('company_id', companyId).eq('card_number', cNum);
-              }
+      for (const payment of salePayments) {
+        const method = String(
+          payment.method || ""
+        ).trim().toLowerCase();
 
-              // 2. Safely verify if this was the last active transaction
-              const { data: otherPayments } = await supabase
-                  .from('sale_payments')
-                  .select('sale_id')
-                  .eq('company_id', companyId)
-                  .ilike('method', 'gift card')
-                  .eq('payment_ref', cNum)
-                  .neq('is_deleted', true)
-                  .neq('sale_id', selectedSale.id); // exclude the one we are currently deleting
+        const cardNumber = String(
+          payment.payment_ref || ""
+        ).trim();
 
-              if (otherPayments && otherPayments.length > 0) {
-                  const otherSaleIds = otherPayments.map(op => op.sale_id);
-                  const { count } = await supabase
-                      .from('sales')
-                      .select('id', { count: 'exact', head: true })
-                      .eq('company_id', companyId)
-                      .neq('is_deleted', true)
-                      .in('id', otherSaleIds);
-                  
-                  if (count === 0) {
-                      await supabase.from('gift_cards').update({ is_used: 0, updated_at: timestampStr }).eq('company_id', companyId).eq('card_number', cNum);
-                  }
-              } else {
-                  await supabase.from('gift_cards').update({ is_used: 0, updated_at: timestampStr }).eq('company_id', companyId).eq('card_number', cNum);
-              }
+        if (
+          method !== "gift card"
+          || !cardNumber
+        ) {
+          continue;
+        }
+
+        const paymentAmount = parseFloat(
+          String(payment.amount || "0")
+        );
+
+        const {
+          data: giftCard,
+          error: cardError
+        } = await supabase
+          .from("gift_cards")
+          .select(
+            "initial_balance, current_balance, status, is_deleted"
+          )
+          .eq("company_id", companyId)
+          .eq("card_number", cardNumber)
+          .maybeSingle();
+
+        if (cardError) {
+          throw cardError;
+        }
+
+        if (giftCard) {
+          const initialBalance =
+            parseFloat(
+              String(
+                giftCard.initial_balance
+                || "0"
+              )
+            );
+
+          const currentBalance =
+            parseFloat(
+              String(
+                giftCard.current_balance
+                || "0"
+              )
+            );
+
+          const reversedBalance =
+            currentBalance
+            + paymentAmount;
+
+          const createdByThisRefund =
+            paymentAmount < -0.001
+            && reversedBalance <= 0.001
+            && initialBalance
+              <= Math.abs(
+                paymentAmount
+              ) + 0.001;
+
+          if (createdByThisRefund) {
+            const { error: deleteError } =
+              await supabase
+                .from("gift_cards")
+                .delete()
+                .eq(
+                  "company_id",
+                  companyId
+                )
+                .eq(
+                  "card_number",
+                  cardNumber
+                );
+
+            if (deleteError) {
+              throw deleteError;
+            }
+          } else {
+            const { error: updateError } =
+              await supabase
+                .from("gift_cards")
+                .update({
+                  current_balance:
+                    reversedBalance,
+                  status:
+                    reversedBalance > 0.001
+                      ? "Active"
+                      : giftCard.status,
+                  is_deleted:
+                    reversedBalance > 0.001
+                      ? false
+                      : giftCard.is_deleted,
+                  updated_at:
+                    timestampStr
+                })
+                .eq(
+                  "company_id",
+                  companyId
+                )
+                .eq(
+                  "card_number",
+                  cardNumber
+                );
+
+            if (updateError) {
+              throw updateError;
+            }
           }
+        }
+
+        const {
+          data: otherPayments,
+          error: otherPaymentError
+        } = await supabase
+          .from("sale_payments")
+          .select("sale_id")
+          .eq("company_id", companyId)
+          .ilike("method", "gift card")
+          .eq("payment_ref", cardNumber)
+          .neq(
+            "sale_id",
+            selectedSale.id
+          )
+          .or(
+            "is_deleted.is.null,is_deleted.eq.false"
+          );
+
+        if (otherPaymentError) {
+          throw otherPaymentError;
+        }
+
+        const otherSaleIds = Array.from(
+          new Set(
+            (otherPayments || [])
+              .map(row => row.sale_id)
+              .filter(Boolean)
+          )
+        );
+
+        let activeUsageCount = 0;
+
+        if (otherSaleIds.length > 0) {
+          const {
+            count,
+            error: countError
+          } = await supabase
+            .from("sales")
+            .select(
+              "id",
+              {
+                count: "exact",
+                head: true
+              }
+            )
+            .eq(
+              "company_id",
+              companyId
+            )
+            .in(
+              "id",
+              otherSaleIds
+            )
+            .or(
+              "is_deleted.is.null,is_deleted.eq.false"
+            );
+
+          if (countError) {
+            throw countError;
+          }
+
+          activeUsageCount =
+            count || 0;
+        }
+
+        if (
+          activeUsageCount === 0
+          && !(
+            giftCard
+            && paymentAmount < -0.001
+            && (
+              parseFloat(
+                String(
+                  giftCard.current_balance
+                  || "0"
+                )
+              )
+              + paymentAmount
+            ) <= 0.001
+            && parseFloat(
+              String(
+                giftCard.initial_balance
+                || "0"
+              )
+            ) <= Math.abs(
+              paymentAmount
+            ) + 0.001
+          )
+        ) {
+          const { error: usageUpdateError } =
+            await supabase
+              .from("gift_cards")
+              .update({
+                is_used: 0,
+                updated_at:
+                  timestampStr
+              })
+              .eq(
+                "company_id",
+                companyId
+              )
+              .eq(
+                "card_number",
+                cardNumber
+              );
+
+          if (usageUpdateError) {
+            throw usageUpdateError;
+          }
+        }
       }
 
       // 1. THE LEDGER MATH: Restock valid inventory (The Supabase DB trigger handles updating the product quantities now)

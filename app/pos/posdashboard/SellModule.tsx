@@ -2723,29 +2723,157 @@ export default function SellModule({
         }
       }
 
-      // 7. Handle Gift Card Payments (Deductions)
+      // 7. Handle Gift Card Payments / Refunds
       for (const p of finalPaymentQueue) {
-        if (p.method === 'Gift Card' && p.card_number) {
-          const { data: existingGc } = await supabase.from('gift_cards')
-            .select('current_balance')
-            .eq('company_id', companyId)
-            .eq('card_number', p.card_number)
-            .maybeSingle(); 
-          
+        if (
+          p.method !== "Gift Card"
+          || !p.card_number
+        ) {
+          continue;
+        }
+
+        const cardNumber = String(
+          p.card_number
+        ).trim();
+
+        const paymentAmount = parseFloat(
+          String(p.amount || "0")
+        );
+
+        const createNewCard = Boolean(
+          p.create_new_gift_card
+        );
+
+        const { data: existingGc, error: gcLookupError } =
+          await supabase
+            .from("gift_cards")
+            .select(
+              "id, current_balance, initial_balance, is_used, is_deleted, status"
+            )
+            .eq("company_id", companyId)
+            .eq("card_number", cardNumber)
+            .maybeSingle();
+
+        if (gcLookupError) {
+          throw new Error(
+            `Gift Card Lookup: ${gcLookupError.message}`
+          );
+        }
+
+        const existingCardIsDeleted =
+          existingGc?.is_deleted === true
+          || existingGc?.is_deleted === 1
+          || String(existingGc?.is_deleted || "0") === "1";
+
+        let newBalance = 0;
+
+        if (
+          paymentAmount < -0.001
+          && (
+            createNewCard
+            || !existingGc
+            || existingCardIsDeleted
+            || existingGc?.status === "Inactive"
+            || existingGc?.status === "Void"
+          )
+        ) {
+          const refundBalance = Math.abs(
+            paymentAmount
+          );
+
+          newBalance = refundBalance;
+
           if (existingGc) {
-             const newBalance = parseFloat(existingGc.current_balance) - p.amount;
-             await supabase.from('gift_cards')
-              .update({ 
+            const { error: reactivateError } =
+              await supabase
+                .from("gift_cards")
+                .update({
+                  store_id: finalStoreId,
+                  initial_balance: refundBalance,
+                  current_balance: refundBalance,
+                  status: "Active",
+                  is_used: 0,
+                  is_deleted: false,
+                  updated_at: timestampStr
+                })
+                .eq("company_id", companyId)
+                .eq("card_number", cardNumber);
+
+            if (reactivateError) {
+              throw new Error(
+                `Gift Card Reactivation: ${reactivateError.message}`
+              );
+            }
+          } else {
+            const { error: createError } =
+              await supabase
+                .from("gift_cards")
+                .insert([
+                  {
+                    id:
+                      `GC_${crypto.randomUUID()
+                        .replace(/-/g, "")
+                        .substring(0, 16)}`,
+                    company_id: companyId,
+                    store_id: finalStoreId,
+                    card_number: cardNumber,
+                    initial_balance: refundBalance,
+                    current_balance: refundBalance,
+                    status: "Active",
+                    is_used: 0,
+                    created_at: timestampStr,
+                    updated_at: timestampStr,
+                    is_deleted: false
+                  }
+                ]);
+
+            if (createError) {
+              throw new Error(
+                `Gift Card Creation: ${createError.message}`
+              );
+            }
+          }
+        } else if (existingGc) {
+          const currentBalance = parseFloat(
+            String(
+              existingGc.current_balance || "0"
+            )
+          );
+
+          newBalance =
+            currentBalance - paymentAmount;
+
+          const { error: updateError } =
+            await supabase
+              .from("gift_cards")
+              .update({
                 current_balance: newBalance,
-                is_used: 1, 
+                status: "Active",
+                is_used:
+                  paymentAmount > 0
+                    ? 1
+                    : existingGc.is_used,
+                is_deleted: false,
                 updated_at: timestampStr
               })
-              .eq('company_id', companyId)
-              .eq('card_number', p.card_number);
-             
-             unique_gc_lines.push(`Card ${p.card_number.slice(-4)} Balance: $${newBalance.toFixed(2)}`);
+              .eq("company_id", companyId)
+              .eq("card_number", cardNumber);
+
+          if (updateError) {
+            throw new Error(
+              `Gift Card Balance Update: ${updateError.message}`
+            );
           }
+        } else {
+          throw new Error(
+            `Gift Card '${cardNumber}' could not be found.`
+          );
         }
+
+        unique_gc_lines.push(
+          `Card ${cardNumber.slice(-4)} Balance: `
+          + `$${newBalance.toFixed(2)}`
+        );
       }
 
       // 8. Inventory Ledger Update 
@@ -2880,87 +3008,186 @@ export default function SellModule({
   const processPayment = async (method: string) => {
     let cardNum: string | null | undefined = undefined;
     let availableGcBalance: number | null = null;
-    
+    let createNewGiftCard = false;
+
+    const currentTotalVal = isRefundMode
+      ? totals.total - originalSaleTotal
+      : totals.total;
+
+    const currentRemaining =
+      currentTotalVal
+      - paymentQueue.reduce(
+          (sum, payment) => sum + payment.amount,
+          0
+        );
+
+    if (Math.abs(currentRemaining) <= 0.001) {
+      return;
+    }
+
+    let amountToPay = parseFloat(splitAmount);
+
+    if (isNaN(amountToPay)) {
+      amountToPay = currentRemaining;
+    }
+
+    const payAmountSigned =
+      currentRemaining >= 0
+        ? Math.abs(amountToPay)
+        : -Math.abs(amountToPay);
+
     if (method === "Gift Card") {
-      cardNum = await customPrompt("Gift Card Payment", "Swipe or Enter Gift Card Number:");
-      
-      if (!cardNum || !cardNum.trim()) return; 
+      cardNum = await customPrompt(
+        "Gift Card Payment",
+        "Swipe or Enter Gift Card Number:"
+      );
+
+      if (!cardNum || !cardNum.trim()) {
+        return;
+      }
+
       cardNum = cardNum.trim();
 
       try {
-          const { data: gc, error } = await supabase
-              .from('gift_cards')
-              .select('current_balance, status')
-              .eq('company_id', companyId)
-              .eq('card_number', cardNum)
-              .maybeSingle();
+        const { data: gc, error } = await supabase
+          .from("gift_cards")
+          .select(
+            "id, current_balance, initial_balance, status, is_deleted"
+          )
+          .eq("company_id", companyId)
+          .eq("card_number", cardNum)
+          .maybeSingle();
 
-          if (error) throw error;
+        if (error) {
+          throw error;
+        }
 
-          if (!gc) {
-              await customAlert("Card Not Found", `Gift Card '${cardNum}' could not be found in the system.`);
-              return;
+        const cardIsActive =
+          Boolean(gc)
+          && gc?.is_deleted !== true
+          && gc?.is_deleted !== 1
+          && String(gc?.is_deleted || "0") !== "1"
+          && gc?.status !== "Inactive"
+          && gc?.status !== "Void";
+
+        if (!cardIsActive) {
+          if (payAmountSigned > 0) {
+            await customAlert(
+              "Gift Card Not Found",
+              `Gift Card '${cardNum}' does not exist or is no longer active.`
+            );
+            return;
           }
 
-          if (gc.status === 'Inactive' || gc.status === 'Void') {
-              await customAlert("Invalid Status", `Gift Card '${cardNum}' is currently marked as ${gc.status}.`);
-              return;
+          createNewGiftCard = window.confirm(
+            `Gift Card '${cardNum}' does not exist yet.\n\n`
+            + `This refund will create and activate the card with a balance of `
+            + `$${Math.abs(payAmountSigned).toFixed(2)}.\n\n`
+            + `The physical gift card should be given to the customer as their refund.\n\n`
+            + `Would you like to create this gift card?`
+          );
+
+          if (!createNewGiftCard) {
+            return;
           }
 
-          availableGcBalance = parseFloat(gc.current_balance || "0");
-          
-          if (availableGcBalance <= 0 && !isRefundMode) {
-              await customAlert("Empty Balance", `Gift Card '${cardNum}' has a $0.00 balance.`);
-              return;
+          availableGcBalance = 0;
+        } else {
+          availableGcBalance = parseFloat(
+            String(gc?.current_balance || "0")
+          );
+
+          if (
+            availableGcBalance <= 0
+            && payAmountSigned > 0
+          ) {
+            await customAlert(
+              "Empty Balance",
+              `Gift Card '${cardNum}' has a $0.00 balance.`
+            );
+            return;
           }
+        }
       } catch (err) {
-          console.error("Error verifying gift card:", err);
-          await customAlert("Network Error", "Failed to verify gift card with the server. Please check your connection.");
-          return;
+        console.error(
+          "Error verifying gift card:",
+          err
+        );
+
+        await customAlert(
+          "Network Error",
+          "Failed to verify the gift card with the server. Please check your connection."
+        );
+        return;
       }
     }
-
-    const currentTotalVal = isRefundMode ? totals.total - originalSaleTotal : totals.total;
-    const currentRemaining = currentTotalVal - paymentQueue.reduce((a, b) => a + b.amount, 0);
-    
-    if (Math.abs(currentRemaining) <= 0.001) return;
-
-    let amountToPay = parseFloat(splitAmount);
-    if (isNaN(amountToPay)) amountToPay = currentRemaining;
-
-    const payAmountSigned = currentRemaining >= 0 ? Math.abs(amountToPay) : -Math.abs(amountToPay);
 
     let actualCharge = payAmountSigned;
     let changeDue = 0;
 
-    if (Math.abs(payAmountSigned) > Math.abs(currentRemaining) + 0.001) {
+    if (
+      Math.abs(payAmountSigned)
+      > Math.abs(currentRemaining) + 0.001
+    ) {
       if (method === "Cash") {
-        changeDue = Math.abs(payAmountSigned) - Math.abs(currentRemaining);
+        changeDue =
+          Math.abs(payAmountSigned)
+          - Math.abs(currentRemaining);
+
         actualCharge = currentRemaining;
       } else {
         actualCharge = currentRemaining;
       }
     }
 
-    if (method === "Gift Card" && availableGcBalance !== null && !isRefundMode) {
-        if (actualCharge > availableGcBalance) {
-            actualCharge = availableGcBalance;
-            await customAlert("Partial Payment Applied", `Gift Card only has $${availableGcBalance.toFixed(2)} available. Applying partial payment to the bill.`);
-        }
+    if (
+      method === "Gift Card"
+      && availableGcBalance !== null
+      && actualCharge > 0
+    ) {
+      if (actualCharge > availableGcBalance) {
+        actualCharge = availableGcBalance;
+
+        await customAlert(
+          "Partial Payment Applied",
+          `Gift Card only has $${availableGcBalance.toFixed(2)} available. `
+          + "Applying the available balance as a partial payment."
+        );
+      }
     }
 
-    const newQueue = [...paymentQueue, { method, amount: actualCharge, card_number: cardNum }];
+    const newQueue = [
+      ...paymentQueue,
+      {
+        method,
+        amount: actualCharge,
+        card_number: cardNum,
+        create_new_gift_card: createNewGiftCard
+      }
+    ];
+
     setPaymentQueue(newQueue);
 
-    const newRemaining = currentTotalVal - newQueue.reduce((a, b) => a + b.amount, 0);
-    
+    const newRemaining =
+      currentTotalVal
+      - newQueue.reduce(
+          (sum, payment) => sum + payment.amount,
+          0
+        );
+
     if (Math.abs(newRemaining) <= 0.01) {
-      const success = await saveTransactionToDatabase(newQueue, changeDue);
+      const success = await saveTransactionToDatabase(
+        newQueue,
+        changeDue
+      );
+
       if (!success) {
-         setPaymentQueue(paymentQueue);
+        setPaymentQueue(paymentQueue);
       }
     } else {
-      setSplitAmount(Math.abs(newRemaining).toFixed(2));
+      setSplitAmount(
+        Math.abs(newRemaining).toFixed(2)
+      );
     }
   };
 

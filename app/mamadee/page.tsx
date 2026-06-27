@@ -33,6 +33,7 @@ interface Recipe {
   steps: Step[];
   media_urls: {
     main_image?: string;
+    images?: string[];
   };
 }
 
@@ -61,8 +62,21 @@ const recipeHasInstructions = (recipe: Pick<Recipe, 'steps'>) => {
   return (recipe.steps || []).some(step => step.text?.trim() !== '' || !!step.audio_url);
 };
 
+const getRecipeImages = (recipe: Pick<Recipe, 'media_urls'>) => {
+  const images = recipe.media_urls?.images || [];
+  const primary = recipe.media_urls?.main_image;
+
+  return Array.from(
+    new Set([primary, ...images].filter((url): url is string => !!url))
+  );
+};
+
+const getPrimaryRecipeImage = (recipe: Pick<Recipe, 'media_urls'>) => {
+  return recipe.media_urls?.main_image || getRecipeImages(recipe)[0];
+};
+
 const recipeHasMainPhoto = (recipe: Pick<Recipe, 'media_urls'>) => {
-  return !!recipe.media_urls?.main_image;
+  return getRecipeImages(recipe).length > 0;
 };
 
 const recipeHasRealCategory = (recipe: Pick<Recipe, 'categories'>) => {
@@ -236,6 +250,8 @@ export default function MamaDeeApp() {
   const [view, setView] = useState<'library' | 'cook' | 'edit' | 'converter'>('library');
   const [recipes, setRecipes] = useState<Recipe[]>([]);
   const [selectedRecipe, setSelectedRecipe] = useState<Recipe | null>(null);
+  const [activeRecipeImage, setActiveRecipeImage] = useState<string>("");
+  const [draggedImageIndex, setDraggedImageIndex] = useState<number | null>(null);
   const [multiplier, setMultiplier] = useState<number>(1);
 
   // New Converter States
@@ -442,6 +458,7 @@ export default function MamaDeeApp() {
           
           if (targetRecipe) {
             setSelectedRecipe(targetRecipe);
+            setActiveRecipeImage(getPrimaryRecipeImage(targetRecipe) || "");
             setView('cook');
             
             // Clean up the URL bar so it just says your normal address again
@@ -605,7 +622,10 @@ export default function MamaDeeApp() {
     } else if (actionType === 'edit') {
       setFormData({ 
         ...payload, 
-        media_urls: payload.media_urls || {},
+        media_urls: {
+          ...(payload.media_urls || {}),
+          images: getRecipeImages(payload)
+        },
         categories: payload.categories || [],
         ingredients: payload.ingredients?.length > 0 ? payload.ingredients : [{ name: '', quantity: 1, unit: '' }],
         steps: payload.steps?.length > 0 ? payload.steps : [{ text: '' }]
@@ -700,10 +720,10 @@ export default function MamaDeeApp() {
       return null;
     };
 
-    if (recipe.media_urls?.main_image) {
-      const path = extractPath(recipe.media_urls.main_image);
+    getRecipeImages(recipe).forEach(url => {
+      const path = extractPath(url);
       if (path) filesToDelete.push(path);
-    }
+    });
 
     recipe.steps?.forEach(step => {
       if (step.audio_url) {
@@ -724,43 +744,160 @@ export default function MamaDeeApp() {
     setLoading(false);
   };
 
+  const extractStoragePath = (url: string) => {
+    const marker = 'mamadee_media/';
+    const index = url.indexOf(marker);
+
+    return index !== -1
+      ? url.substring(index + marker.length)
+      : null;
+  };
+
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
+    const files = Array.from(e.target.files || []);
+    if (files.length === 0) return;
+
+    const currentImages = getRecipeImages(formData);
+    const availableSlots = 5 - currentImages.length;
+
+    if (availableSlots <= 0) {
+      alert("A recipe can have a maximum of 5 photos.");
+      e.target.value = "";
+      return;
+    }
+
+    const filesToUpload = files.slice(0, availableSlots);
+
+    if (files.length > availableSlots) {
+      alert(
+        `Only ${availableSlots} more photo${availableSlots === 1 ? '' : 's'} can be added. The extra files were skipped.`
+      );
+    }
 
     setImageUploading(true);
 
-    if (formData.media_urls?.main_image) {
-      const oldUrl = formData.media_urls.main_image;
-      const marker = 'mamadee_media/';
-      const index = oldUrl.indexOf(marker);
-      
-      if (index !== -1) {
-        const oldPath = oldUrl.substring(index + marker.length);
-        console.log("Attempting to delete replaced image from storage:", oldPath);
-        
-        const { error: removeError } = await supabase.storage.from('mamadee_media').remove([oldPath]);
-        
-        if (removeError) {
-          console.error("Storage Deletion Error:", removeError);
-        } else {
-          console.log("Successfully deleted old image from storage.");
-        }
+    const uploadedUrls: string[] = [];
+
+    for (const file of filesToUpload) {
+      const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
+      const fileName = `image_${Date.now()}_${Math.random()
+        .toString(36)
+        .slice(2, 8)}_${sanitizedFileName}`;
+
+      const storagePath = `images/${fileName}`;
+
+      const { data, error } = await supabase.storage
+        .from('mamadee_media')
+        .upload(storagePath, file);
+
+      if (error) {
+        alert(`Failed to upload ${file.name}: ${error.message}`);
+        continue;
+      }
+
+      if (data) {
+        const { data: publicData } = supabase.storage
+          .from('mamadee_media')
+          .getPublicUrl(storagePath);
+
+        uploadedUrls.push(publicData.publicUrl);
       }
     }
 
-    const sanitizedFileName = file.name.replace(/[^a-zA-Z0-9.]/g, '_');
-    const fileName = `image_${Date.now()}_${sanitizedFileName}`;
-    
-    const { data, error } = await supabase.storage.from('mamadee_media').upload(`images/${fileName}`, file);
+    if (uploadedUrls.length > 0) {
+      setFormData(prev => {
+        const existingImages = getRecipeImages(prev);
+        const images = [...existingImages, ...uploadedUrls].slice(0, 5);
 
-    if (error) {
-      alert(`Failed to upload image: ${error.message}`);
-    } else if (data) {
-      const { data: publicData } = supabase.storage.from('mamadee_media').getPublicUrl(`images/${fileName}`);
-      setFormData(prev => ({ ...prev, media_urls: { ...prev.media_urls, main_image: publicData.publicUrl } }));
+        return {
+          ...prev,
+          media_urls: {
+            ...prev.media_urls,
+            main_image: prev.media_urls?.main_image || images[0],
+            images
+          }
+        };
+      });
     }
+
     setImageUploading(false);
+    e.target.value = "";
+  };
+
+  const handleSetPrimaryImage = (url: string) => {
+    setFormData(prev => ({
+      ...prev,
+      media_urls: {
+        ...prev.media_urls,
+        main_image: url,
+        images: getRecipeImages(prev)
+      }
+    }));
+  };
+
+  const handleMoveImage = (fromIndex: number, toIndex: number) => {
+    if (
+      fromIndex === toIndex ||
+      toIndex < 0 ||
+      toIndex >= getRecipeImages(formData).length
+    ) {
+      return;
+    }
+
+    setFormData(prev => {
+      const images = getRecipeImages(prev);
+      const [movedImage] = images.splice(fromIndex, 1);
+
+      images.splice(toIndex, 0, movedImage);
+
+      return {
+        ...prev,
+        media_urls: {
+          ...prev.media_urls,
+          images
+        }
+      };
+    });
+  };
+
+  const handleRemoveImage = async (url: string) => {
+    const confirmed = window.confirm(
+      "Remove this photo from the recipe?"
+    );
+
+    if (!confirmed) return;
+
+    const path = extractStoragePath(url);
+
+    if (path) {
+      const { error } = await supabase.storage
+        .from('mamadee_media')
+        .remove([path]);
+
+      if (error) {
+        alert(`Failed to remove photo: ${error.message}`);
+        return;
+      }
+    }
+
+    setFormData(prev => {
+      const images = getRecipeImages(prev).filter(
+        imageUrl => imageUrl !== url
+      );
+
+      const currentPrimary = prev.media_urls?.main_image;
+
+      return {
+        ...prev,
+        media_urls: {
+          ...prev.media_urls,
+          main_image: currentPrimary === url
+            ? images[0]
+            : currentPrimary,
+          images
+        }
+      };
+    });
   };
 
   const handleAddCategoryToForm = (e?: React.MouseEvent | React.KeyboardEvent) => {
@@ -988,17 +1125,152 @@ export default function MamaDeeApp() {
             </button>
 
             <div className="bg-[#2D2D2D] rounded-xl p-4 md:p-6 shadow-lg border border-[#444] space-y-4">
-              <div className="flex flex-col items-center justify-center p-4 border-2 border-dashed border-[#555] rounded-xl bg-[#1E1E1E]">
-                {formData.media_urls?.main_image ? (
-                  <div className="relative w-full aspect-square md:aspect-auto md:h-48 mb-4">
-                    <img src={formData.media_urls.main_image} alt="Recipe" className="w-full h-full object-contain md:object-cover rounded-lg shadow-md bg-[#111]" />
+              <div className="p-4 border-2 border-dashed border-[#555] rounded-xl bg-[#1E1E1E]">
+                <div className="flex items-center justify-between gap-3 mb-3">
+                  <div>
+                    <div className="font-bold text-gray-200">
+                      Recipe Photos
+                    </div>
+
+                    <div className="text-xs text-gray-500">
+                      Up to 5 photos. Drag them or use the arrow buttons to rearrange.
+                    </div>
+                  </div>
+
+                  <span className="text-xs font-bold text-gray-400 whitespace-nowrap">
+                    {getRecipeImages(formData).length}/5
+                  </span>
+                </div>
+
+                {getRecipeImages(formData).length > 0 ? (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+                    {getRecipeImages(formData).map((url, index) => {
+                      const isPrimary =
+                        formData.media_urls?.main_image === url;
+
+                      return (
+                        <div
+                          key={url}
+                          draggable
+                          onDragStart={() => setDraggedImageIndex(index)}
+                          onDragOver={e => e.preventDefault()}
+                          onDrop={() => {
+                            if (draggedImageIndex !== null) {
+                              handleMoveImage(
+                                draggedImageIndex,
+                                index
+                              );
+                            }
+
+                            setDraggedImageIndex(null);
+                          }}
+                          onDragEnd={() => setDraggedImageIndex(null)}
+                          className={`rounded-lg border overflow-hidden bg-[#111] ${
+                            isPrimary
+                              ? 'border-[#C53636] ring-2 ring-[#C53636]/30'
+                              : 'border-[#444]'
+                          }`}
+                        >
+                          <div className="relative aspect-video">
+                            <img
+                              src={url}
+                              alt={`Recipe photo ${index + 1}`}
+                              className="w-full h-full object-cover"
+                            />
+
+                            <div className="absolute top-2 left-2 bg-black/70 text-white text-xs font-bold px-2 py-1 rounded">
+                              {index + 1}
+                            </div>
+
+                            {isPrimary && (
+                              <div className="absolute top-2 right-2 bg-[#C53636] text-white text-xs font-bold px-2 py-1 rounded">
+                                Primary
+                              </div>
+                            )}
+                          </div>
+
+                          <div className="p-2 flex flex-wrap items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMoveImage(index, index - 1)
+                              }
+                              disabled={index === 0}
+                              className="bg-[#333] disabled:opacity-30 hover:bg-[#444] border border-[#555] rounded px-2 py-1 text-sm"
+                              title="Move left"
+                            >
+                              ←
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleMoveImage(index, index + 1)
+                              }
+                              disabled={
+                                index ===
+                                getRecipeImages(formData).length - 1
+                              }
+                              className="bg-[#333] disabled:opacity-30 hover:bg-[#444] border border-[#555] rounded px-2 py-1 text-sm"
+                              title="Move right"
+                            >
+                              →
+                            </button>
+
+                            {!isPrimary && (
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSetPrimaryImage(url)
+                                }
+                                className="bg-[#333] hover:bg-[#444] border border-[#555] rounded px-2 py-1 text-xs font-bold"
+                              >
+                                Make Primary
+                              </button>
+                            )}
+
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveImage(url)}
+                              className="ml-auto text-red-400 hover:text-red-300 text-xs font-bold px-2 py-1"
+                            >
+                              Remove
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 ) : (
-                  <span className="text-gray-500 mb-2 text-sm">No photo selected</span>
+                  <div className="text-gray-500 mb-4 text-sm text-center py-6">
+                    No photos selected
+                  </div>
                 )}
-                <label className="bg-[#333] hover:bg-[#444] px-4 py-3 rounded-md cursor-pointer text-sm font-bold border border-[#555] transition-colors w-full text-center md:w-auto">
-                  {imageUploading ? 'Uploading...' : '📸 Upload Photo'}
-                  <input type="file" accept="image/*" className="hidden" onChange={handleImageUpload} disabled={imageUploading} />
+
+                <label
+                  className={`bg-[#333] hover:bg-[#444] px-4 py-3 rounded-md cursor-pointer text-sm font-bold border border-[#555] transition-colors w-full text-center block ${
+                    getRecipeImages(formData).length >= 5
+                      ? 'opacity-50 pointer-events-none'
+                      : ''
+                  }`}
+                >
+                  {imageUploading
+                    ? 'Uploading...'
+                    : getRecipeImages(formData).length === 0
+                      ? '📸 Upload Photos'
+                      : '📸 Add More Photos'}
+
+                  <input
+                    type="file"
+                    accept="image/*"
+                    multiple
+                    className="hidden"
+                    onChange={handleImageUpload}
+                    disabled={
+                      imageUploading ||
+                      getRecipeImages(formData).length >= 5
+                    }
+                  />
                 </label>
               </div>
 
@@ -1192,11 +1464,56 @@ export default function MamaDeeApp() {
           </div>
 
           <div className="bg-[#2D2D2D] border border-[#444] rounded-xl p-3 md:p-6 mb-4 md:mb-6 shadow-lg flex flex-col md:flex-row gap-4 md:gap-6 print:bg-white print:border-none print:shadow-none print:p-0 print:mb-6 print:flex-row">
-            {selectedRecipe.media_urls?.main_image && (
-              <div className="relative w-full aspect-square md:aspect-auto md:w-1/3 md:max-h-64 rounded-lg overflow-hidden shadow-inner bg-[#111] shrink-0 print:w-48 print:h-48 print:max-h-48 print:aspect-square print:bg-transparent">
-                <img src={selectedRecipe.media_urls.main_image} alt="Recipe" className="w-full h-full object-contain md:object-cover print:object-contain print:object-left-top" />
+            {getRecipeImages(selectedRecipe).length > 0 && (
+              <div className="w-full md:w-1/3 shrink-0 print:w-48">
+                <div className="relative w-full aspect-square md:aspect-auto md:h-64 rounded-lg overflow-hidden shadow-inner bg-[#111] print:w-48 print:h-48 print:bg-transparent">
+                  <img
+                    src={
+                      activeRecipeImage ||
+                      getPrimaryRecipeImage(selectedRecipe)
+                    }
+                    alt="Recipe"
+                    className="w-full h-full object-contain md:object-cover print:object-contain print:object-left-top"
+                  />
+                </div>
+
+                {getRecipeImages(selectedRecipe).length > 1 && (
+                  <div className="grid grid-cols-5 gap-2 mt-2 print:grid-cols-4 print:gap-1">
+                    {getRecipeImages(selectedRecipe).map(
+                      (url, index) => (
+                        <button
+                          type="button"
+                          key={url}
+                          onClick={() => setActiveRecipeImage(url)}
+                          className={`relative aspect-square rounded overflow-hidden border-2 print:border print:break-inside-avoid ${
+                            (
+                              activeRecipeImage ||
+                              getPrimaryRecipeImage(selectedRecipe)
+                            ) === url
+                              ? 'border-[#C53636]'
+                              : 'border-[#555]'
+                          }`}
+                        >
+                          <img
+                            src={url}
+                            alt={`Recipe photo ${index + 1}`}
+                            className="w-full h-full object-cover"
+                          />
+
+                          {getPrimaryRecipeImage(selectedRecipe) ===
+                            url && (
+                            <span className="absolute bottom-0 left-0 right-0 bg-[#C53636]/90 text-white text-[8px] font-bold py-0.5 print:hidden">
+                              PRIMARY
+                            </span>
+                          )}
+                        </button>
+                      )
+                    )}
+                  </div>
+                )}
               </div>
             )}
+
             <div className="flex-1">
               <h1 className="text-2xl md:text-3xl font-bold mb-2 leading-tight print:text-black">{selectedRecipe.title}</h1>
               <p className="text-gray-400 italic mb-4 text-base md:text-lg print:text-gray-700">{selectedRecipe.description}</p>
@@ -1464,7 +1781,7 @@ export default function MamaDeeApp() {
             {filteredRecipes.length > 0 ? (
               filteredRecipes.map((recipe) => (
                 // --- UPDATE THIS CLICK EVENT ---
-                <div id={`recipe-card-${recipe.id}`} key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; libraryRestoreRecipeIdRef.current = String(recipe.id); setSelectedRecipe(recipe); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className={`relative bg-[#2D2D2D] border rounded-xl cursor-pointer transition-all shadow-lg overflow-hidden flex flex-col ${
+                <div id={`recipe-card-${recipe.id}`} key={recipe.id} onClick={() => { libraryScrollYRef.current = window.scrollY; libraryRestoreRecipeIdRef.current = String(recipe.id); setSelectedRecipe(recipe); setActiveRecipeImage(getPrimaryRecipeImage(recipe) || ""); setMultiplier(1); setActiveStep(-1); setIsListening(false); setView('cook'); }} className={`relative bg-[#2D2D2D] border rounded-xl cursor-pointer transition-all shadow-lg overflow-hidden flex flex-col ${
                     (recipe.categories || []).includes(INCOMPLETE_CATEGORY)
                       ? 'border-4 border-red-600 ring-2 ring-red-600/60 hover:border-red-400'
                       : 'border-[#444] hover:border-[#C53636]'
@@ -1508,9 +1825,13 @@ export default function MamaDeeApp() {
                     </>
                   )}
 
-                  {recipe.media_urls?.main_image ? (
+                  {getPrimaryRecipeImage(recipe) ? (
                     <div className="relative h-40 md:h-48 w-full bg-[#1E1E1E]">
-                      <img src={recipe.media_urls.main_image} alt={recipe.title} className="w-full h-full object-cover" />
+                      <img
+                        src={getPrimaryRecipeImage(recipe)}
+                        alt={recipe.title}
+                        className="w-full h-full object-cover"
+                      />
                     </div>
                   ) : (
                     <div className="h-40 md:h-48 w-full bg-[#1E1E1E] flex items-center justify-center text-[#555] font-bold tracking-widest uppercase text-xs md:text-sm border-b border-[#444]">No Image</div>
