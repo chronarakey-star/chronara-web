@@ -91,6 +91,98 @@ const getDefaultProvincialTaxCode = (province?: string) => {
     return "Exempt";
 };
 
+const ensureCompanyAccount = async (
+    companyId: string,
+    accountName: string,
+    accountType: string,
+    defaultTax = "Exempt"
+): Promise<string> => {
+    const cleanCompanyId = String(companyId || "").trim();
+    const cleanAccountName = String(accountName || "")
+        .trim()
+        .replace(/\s+/g, " ");
+
+    const { data: existingAccount, error: existingError } =
+        await supabase
+            .from("chart_of_accounts")
+            .select("id, is_active")
+            .eq("company_id", cleanCompanyId)
+            .ilike("name", cleanAccountName)
+            .limit(1)
+            .maybeSingle();
+
+    if (existingError) {
+        throw existingError;
+    }
+
+    if (existingAccount?.id) {
+        if (!existingAccount.is_active) {
+            const { error: reactivateError } =
+                await supabase
+                    .from("chart_of_accounts")
+                    .update({
+                        is_active: 1
+                    })
+                    .eq("id", existingAccount.id)
+                    .eq("company_id", cleanCompanyId);
+
+            if (reactivateError) {
+                throw reactivateError;
+            }
+        }
+
+        return String(existingAccount.id);
+    }
+
+    const safeCompany = cleanCompanyId
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toLowerCase();
+
+    const safeName = cleanAccountName
+        .replace(/[^a-zA-Z0-9]/g, "")
+        .toLowerCase();
+
+    let accountId =
+        `acc_def_${safeCompany}_${safeName}`;
+
+    const { data: conflictingId, error: conflictError } =
+        await supabase
+            .from("chart_of_accounts")
+            .select("id")
+            .eq("id", accountId)
+            .limit(1)
+            .maybeSingle();
+
+    if (conflictError) {
+        throw conflictError;
+    }
+
+    if (conflictingId?.id) {
+        accountId =
+            `acc_${crypto.randomUUID().replace(/-/g, "")}`;
+    }
+
+    const { error: insertError } =
+        await supabase
+            .from("chart_of_accounts")
+            .insert([{
+                id: accountId,
+                company_id: cleanCompanyId,
+                name: cleanAccountName,
+                account_type: accountType,
+                default_tax: defaultTax,
+                is_prime: 1,
+                parent_name: "",
+                is_active: 1
+            }]);
+
+    if (insertError) {
+        throw insertError;
+    }
+
+    return accountId;
+};
+
 export default function OpenCloseModule({
   companyId,
   storeId,
@@ -116,8 +208,7 @@ export default function OpenCloseModule({
   const [activePayments, setActivePayments] = useState<string[]>(["Debit", "Visa", "Mastercard"]);
   const [expectedNonCash, setExpectedNonCash] = useState<Record<string, number>>({});
   
-  // --- NEW: Tracks Cloud License Status ---
-  const [hasBookkeeping, setHasBookkeeping] = useState(false);
+
   
   // Inputs
   const [denomCounts, setDenomCounts] = useState<Record<string, string>>({});
@@ -151,7 +242,9 @@ export default function OpenCloseModule({
   // Keep Ref synced with actual state so the heartbeat always knows what screen we are looking at
   useEffect(() => {
     sessionTypeRef.current = sessionType;
-    setShowClosingSyncReminder(true);
+    setShowClosingSyncReminder(
+      sessionType === "Close"
+    );
   }, [sessionType]);
 
   // --- INITIALIZATION ---
@@ -163,6 +256,93 @@ export default function OpenCloseModule({
     tillId
   ]);
 
+  const fetchBooksPostingStatus =
+    async (): Promise<{
+      ownsBooks: boolean;
+      activatedAt: string | null;
+    }> => {
+      const [
+        licenseResult,
+        activationResult
+      ] = await Promise.all([
+        supabase
+          .from("licenses")
+          .select("module")
+          .eq(
+            "claimed_by_company",
+            companyId
+          )
+          .eq(
+            "is_active",
+            true
+          ),
+
+        supabase
+          .from("company_feature_flags")
+          .select(
+            "enabled, created_at"
+          )
+          .eq(
+            "company_id",
+            companyId
+          )
+          .eq(
+            "feature_key",
+            "books_module_activated"
+          )
+          .maybeSingle()
+      ]);
+
+      if (licenseResult.error) {
+        throw licenseResult.error;
+      }
+
+      if (activationResult.error) {
+        throw activationResult.error;
+      }
+
+      const licenses =
+        licenseResult.data || [];
+
+      const ownsBooks = licenses.some(
+        license => {
+          const moduleName = String(
+            license.module || ""
+          ).toUpperCase();
+
+          return (
+            moduleName === "BOOKS"
+            || moduleName === "SUITE"
+            || moduleName.includes(
+              "BOOKS"
+            )
+            || moduleName.includes(
+              "SUITE"
+            )
+          );
+        }
+      );
+
+      const activationFlag =
+        activationResult.data;
+
+      const activatedAt =
+        ownsBooks
+        && Boolean(
+          activationFlag?.enabled
+        )
+        && activationFlag?.created_at
+          ? String(
+              activationFlag.created_at
+            )
+          : null;
+
+      return {
+        ownsBooks,
+        activatedAt
+      };
+    };
+    
   const loadSessionData = async () => {
     setIsLoading(true);
 
@@ -195,22 +375,9 @@ export default function OpenCloseModule({
       setStoreName(sName);
       setStoreProvince(normalizeProvince(sProv));
 
-      // --- NEW: CLOUD LICENSE VERIFICATION ---
-      const { data: licenses } = await supabase
-        .from('licenses')
-        .select('module')
-        .eq('claimed_by_company', companyId)
-        .eq('is_active', true);
-
-      let ownsBooks = false;
-      if (licenses) {
-        ownsBooks = licenses.some(lic => {
-          const mod = (lic.module || "").toUpperCase();
-          return mod === 'SUITE' || mod === 'BOOKS' || mod.includes('BOOKS') || mod.includes('SUITE');
-        });
-      }
-      setHasBookkeeping(ownsBooks);
-      // ---------------------------------------
+      // Verify that the company can read its current Bookkeeping
+      // licence and permanent activation record.
+      await fetchBooksPostingStatus();
 
       const { data: compData } = await supabase.from('companies').select('config_json').eq('id', companyId).single();
       let isBlind = true;
@@ -1239,8 +1406,53 @@ export default function OpenCloseModule({
       // --- STRICT UTC RULE ---
       const now = new Date();
       const nowIso = now.toISOString();
-      const nowTs = Math.floor(now.getTime() / 1000);
-      const targetStoreId = storeId === "ALL_STORES" ? null : storeId;
+      const nowTs = Math.floor(
+        now.getTime() / 1000
+      );
+
+      const targetStoreId =
+        storeId === "ALL_STORES"
+          ? null
+          : storeId;
+
+      // Open records never post to Bookkeeping.
+      //
+      // For a Close, recheck the cloud licence and activation flag at
+      // the exact moment of saving instead of relying only on React
+      // state loaded earlier.
+      let booksPostingEligible =
+        false;
+
+      if (sessionType === "Close") {
+        const currentBooksStatus =
+          await fetchBooksPostingStatus();
+
+
+
+        if (
+          currentBooksStatus.ownsBooks
+          && currentBooksStatus.activatedAt
+        ) {
+          const activationDateOnly =
+            String(
+              currentBooksStatus
+                .activatedAt
+            ).slice(
+              0,
+              10
+            );
+
+          const closeDateOnly =
+            nowIso.slice(
+              0,
+              10
+            );
+
+          booksPostingEligible =
+            closeDateOnly
+            >= activationDateOnly;
+        }
+      }
 
       // --- LOCAL PROJECTION FOR Z-REPORT DISPLAY ---
       const localTz = getStoreTimezone(storeProvince, storeId === "ALL_STORES");
@@ -1302,31 +1514,45 @@ export default function OpenCloseModule({
       // 1. Save Cash Session (Always runs)
       const { error: sessionError } =
         await supabase
-          .from('cash_sessions')
-          .insert([{
-            id: sessionId,
-            date: nowIso,
-            timestamp: nowTs,
-            type: sessionType,
-            company_id: companyId,
-            store_id: targetStoreId,
-            till_id: tillId,
-            user:
-              user?.username
-              || "Unknown",
-         total: currentCashTotal,
-         expected_cash: sessionType === "Close" ? expectedCash : 0,
-         variance: sessionType === "Close" ? cashVariance : 0,
-         notes: notes.trim(),
-         denominations: denomJsonStr
-      }]);
+          .from("cash_sessions")
+          .insert([
+            {
+              id: sessionId,
+              date: nowIso,
+              timestamp: nowTs,
+              type: sessionType,
+              company_id: companyId,
+              store_id: targetStoreId,
+              till_id: tillId,
+              user:
+                user?.username
+                || "Unknown",
+              total: currentCashTotal,
+              expected_cash:
+                sessionType === "Close"
+                  ? expectedCash
+                  : 0,
+              variance:
+                sessionType === "Close"
+                  ? cashVariance
+                  : 0,
+              notes: notes.trim(),
+              denominations:
+                denomJsonStr,
+              books_posting_eligible:
+                booksPostingEligible
+            }
+          ]);
 
       if (sessionError) throw new Error(`Failed to save Cash Session: ${sessionError.message}`);
 
       // ==========================================
       // PHASE 4: BOOKKEEPING INTEGRATION (Z-REPORT)
       // ==========================================
-      if (sessionType === "Close" && hasBookkeeping) {
+      if (
+        sessionType === "Close"
+        && booksPostingEligible
+      ) {
 
           // B. Aggregate Data for the Shift
           const sinceIso = new Date(lastOpenTimestamp * 1000).toISOString();
@@ -1578,29 +1804,22 @@ export default function OpenCloseModule({
               sysAccounts.push({ name: accName, type: "Current Liability", tax: "Exempt" });
           });
 
-          const { data: existingAccs } = await supabase.from('chart_of_accounts').select('name').eq('company_id', companyId).in('name', sysAccounts.map(a => a.name));
-          const existingNames = existingAccs?.map(a => a.name) || [];
-
           await supabase
-              .from('chart_of_accounts')
-              .update({ account_type: "Cost of Goods Sold" })
-              .eq('company_id', companyId)
-              .eq('name', "Cost of Goods Sold")
-              .eq('account_type', "Expense");
+              .from("chart_of_accounts")
+              .update({
+                  account_type: "Cost of Goods Sold"
+              })
+              .eq("company_id", companyId)
+              .eq("name", "Cost of Goods Sold")
+              .eq("account_type", "Expense");
 
           for (const acc of sysAccounts) {
-              if (!existingNames.includes(acc.name)) {
-                  const safeName = acc.name.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
-                  await supabase.from('chart_of_accounts').insert([{
-                      id: `acc_def_${safeName}`,
-                      company_id: companyId,
-                      name: acc.name,
-                      account_type: acc.type,
-                      default_tax: acc.tax,
-                      is_prime: 1,
-                      parent_name: ''
-                  }]);
-              }
+              await ensureCompanyAccount(
+                  companyId,
+                  acc.name,
+                  acc.type,
+                  acc.tax
+              );
           }
 
           const jeId = `je_${crypto.randomUUID().replace(/-/g, "")}`;
@@ -2035,7 +2254,7 @@ export default function OpenCloseModule({
 
       </div>
 
-      {showClosingSyncReminder && (
+      {sessionType === "Close" && showClosingSyncReminder && (
         <div className="absolute bottom-6 right-6 z-40 w-[390px] rounded-xl border border-orange-500/50 bg-[#202020] shadow-2xl">
           <div className="flex items-start gap-3 p-5">
             <div className="text-orange-400 text-[22px] leading-none">
