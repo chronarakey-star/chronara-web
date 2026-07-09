@@ -688,14 +688,23 @@ export default function TimeClockDashboard() {
               }
 
               if (autoClockOutTime) {
-                  const outIso = autoClockOutTime.toISOString();
+                  const outIso =
+                    autoClockOutTime.toISOString();
+
+                  const updatedAtIso =
+                    new Date().toISOString();
+
                   await supabase
                       .from('time_punches')
                       .update({
                         clock_out: outIso,
+                        actual_clock_out: outIso,
+                        minimum_reporting_applied: 0,
+                        applied_min_reporting_hours: 0,
                         status: 'Pending Edit',
-                        req_notes: 'SYSTEM: Auto-Clocked Out (Forgot to punch)',
-                        updated_at: outIso
+                        req_notes:
+                          'SYSTEM: Auto-Clocked Out (Forgot to punch)',
+                        updated_at: updatedAtIso
                       })
                       .eq('company_id', currentCompanyId)
                       .eq('id', punch.id);
@@ -704,7 +713,7 @@ export default function TimeClockDashboard() {
                       .from('time_punch_breaks')
                       .update({
                         break_end: outIso,
-                        updated_at: outIso
+                        updated_at: updatedAtIso
                       })
                       .eq('company_id', currentCompanyId)
                       .eq('punch_id', punch.id)
