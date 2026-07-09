@@ -262,7 +262,9 @@ export default function TimeClockDashboard() {
 
       let punchQuery = supabase
         .from('time_punches')
-        .select('id, clock_in, clock_out, employee_id')
+        .select(
+          'id, clock_in, clock_out, employee_id, applied_rounding_mins, minimum_reporting_applied, applied_min_reporting_hours'
+        )
         .eq('company_id', currentCompanyId)
         .in('employee_id', empIds)
 ;
@@ -295,40 +297,6 @@ export default function TimeClockDashboard() {
       
           : { data: [] };
 
-      let schedQuery = supabase
-        .from('schedules')
-        .select('employee_id, date')
-        .eq('company_id', currentCompanyId)
-        .in('employee_id', empIds);
-
-      if (currentStoreId && currentStoreId !== "ALL_STORES") {
-        schedQuery = schedQuery.eq(
-          'store_id',
-          currentStoreId
-        );
-      }
-      const { data: schedData } = await schedQuery;
-      const schedSet = new Set(schedData?.map(s => `${s.employee_id}_${s.date}`));
-
-      let minPayActive = false;
-      let minPayHours = 3.0;
-
-      if (currentStoreId) {
-          const { data: sSetData } = await supabase
-            .from('store_time_clock_settings')
-            .select(
-              'min_reporting_pay, min_reporting_hours'
-            )
-            .eq('company_id', currentCompanyId)
-            .eq('store_id', currentStoreId)
-            .limit(1);
-          if (sSetData && sSetData.length > 0) {
-              const sSet = sSetData[0];
-              minPayActive = sSet.min_reporting_pay === 1 || String(sSet.min_reporting_pay).toLowerCase() === "true";
-              minPayHours = parseFloat(sSet.min_reporting_hours || "3.0");
-          }
-      }
-
       const calcNetHours = (punches: any[], breaks: any[]) => {
           let totalSec = 0;
           punches.forEach(p => {
@@ -336,23 +304,124 @@ export default function TimeClockDashboard() {
                   try {
                       let tIn = new Date(p.clock_in);
                       let tOut = new Date(p.clock_out);
-                      const grossSec = (tOut.getTime() - tIn.getTime()) / 1000.0;
+
+                      const roundMins =
+                        Number(
+                          p.applied_rounding_mins || 0
+                        );
+
+                      const roundDate = (
+                        date: Date,
+                        minutes: number
+                      ) => {
+                        if (minutes <= 0) {
+                          return date;
+                        }
+
+                        const intervalMs =
+                          minutes * 60 * 1000;
+
+                        const remainder =
+                          date.getTime() % intervalMs;
+
+                        let roundedTime =
+                          date.getTime() - remainder;
+
+                        if (
+                          remainder >= intervalMs / 2
+                        ) {
+                          roundedTime += intervalMs;
+                        }
+
+                        return new Date(roundedTime);
+                      };
+
+                      if (roundMins > 0) {
+                        tIn = roundDate(
+                          tIn,
+                          roundMins
+                        );
+
+                        tOut = roundDate(
+                          tOut,
+                          roundMins
+                        );
+                      }
+
+                      const grossSec =
+                        (
+                          tOut.getTime()
+                          - tIn.getTime()
+                        ) / 1000.0;
                       
-                      const pBreaks = (breaks || []).filter(b => b.punch_id === p.id && b.break_end);
+                      const pBreaks =
+                        (breaks || []).filter(
+                          b =>
+                            b.punch_id === p.id
+                            && b.break_end
+                        );
+
                       let breakSec = 0;
+
                       pBreaks.forEach(b => {
-                          try {
-                              breakSec += (new Date(b.break_end).getTime() - new Date(b.break_start).getTime()) / 1000.0;
-                          } catch (e) {}
+                        try {
+                          let breakStart =
+                            new Date(
+                              b.break_start
+                            );
+
+                          let breakEnd =
+                            new Date(
+                              b.break_end
+                            );
+
+                          if (roundMins > 0) {
+                            breakStart =
+                              roundDate(
+                                breakStart,
+                                roundMins
+                              );
+
+                            breakEnd =
+                              roundDate(
+                                breakEnd,
+                                roundMins
+                              );
+                          }
+
+                          breakSec +=
+                            (
+                              breakEnd.getTime()
+                              - breakStart.getTime()
+                            ) / 1000.0;
+
+                        } catch (e) {}
                       });
                       
-                      let netHours = Math.max(0, grossSec - breakSec) / 3600.0;
-                      
-                      if (minPayActive && netHours > 0 && netHours < minPayHours) {
-                          const localDateStr = getZonedDateStr(tIn, tz);
-                          if (schedSet.has(`${p.employee_id}_${localDateStr}`)) netHours = minPayHours;
+                      let netHours =
+                        Math.max(
+                          0,
+                          grossSec - breakSec
+                        ) / 3600.0;
+
+                      const minimumApplied =
+                        Number(
+                          p.minimum_reporting_applied || 0
+                        ) === 1;
+
+                      const appliedMinimumHours =
+                        Number(
+                          p.applied_min_reporting_hours || 0
+                        );
+
+                      if (
+                        minimumApplied &&
+                        appliedMinimumHours > netHours
+                      ) {
+                        netHours =
+                          appliedMinimumHours;
                       }
-                      
+
                       totalSec += netHours * 3600.0;
                   } catch (e) {}
               }
@@ -1141,12 +1210,19 @@ export default function TimeClockDashboard() {
   const handleClockOut = async () => {
     if (!requireStoreAccessForPunching()) return;
     if (!activePunchId || !employee) return;
-    let nowIso = new Date().toISOString(); 
+
+    const actualClockOutIso =
+      new Date().toISOString();
+
+    let minimumReportingApplied = false;
+    let appliedMinimumReportingHours = 0;
 
     try {
       const { data: punchData } = await supabase
         .from('time_punches')
-        .select('clock_in, store_id')
+        .select(
+          'clock_in, store_id, applied_rounding_mins'
+        )
         .eq('company_id', companyId)
         .eq('id', activePunchId)
 
@@ -1160,17 +1236,32 @@ export default function TimeClockDashboard() {
           const { data: settingsData } = await supabase
             .from('store_time_clock_settings')
             .select(
-              'min_reporting_pay, min_reporting_hours, round_time_punches, rounding_increment_mins'
+              'min_reporting_pay, min_reporting_hours'
             )
             .eq('company_id', companyId)
             .eq('store_id', activeStoreId)
             .limit(1);
 
           const s = settingsData?.[0];
-          const minPayActive = s?.min_reporting_pay === 1 || String(s?.min_reporting_pay).toLowerCase() === "true";
-          const minHrs = parseFloat(s?.min_reporting_hours as string) || 3.0;
-          const isRounded = s?.round_time_punches === 1 || String(s?.round_time_punches).toLowerCase() === "true";
-          const roundMins = parseInt(s?.rounding_increment_mins as string, 10) || 15;
+
+          const minPayActive =
+            s?.min_reporting_pay === 1
+            || String(
+              s?.min_reporting_pay
+            ).toLowerCase() === "true";
+
+          const minHrs =
+            parseFloat(
+              s?.min_reporting_hours as string
+            ) || 3.0;
+
+          const roundMins =
+            Number(
+              punchData.applied_rounding_mins || 0
+            );
+
+          const isRounded =
+            roundMins > 0;
 
           const roundDate = (dt: Date, rMins: number) => {
               if (rMins <= 0) return dt;
@@ -1245,9 +1336,8 @@ export default function TimeClockDashboard() {
               const shift = (schedData || []).find(s => s.date === dateStr);
               
               if (shift) {
-                  const paddedSec = breakSec + (minHrs * 3600.0);
-                  const paddedOutDt = new Date(clockInDt.getTime() + (paddedSec * 1000));
-                  nowIso = paddedOutDt.toISOString();
+                  minimumReportingApplied = true;
+                  appliedMinimumReportingHours = minHrs;
               }
           }
       }
@@ -1255,9 +1345,14 @@ export default function TimeClockDashboard() {
       const { error } = await supabase
         .from('time_punches')
         .update({
-          clock_out: nowIso,
+          clock_out: actualClockOutIso,
+          actual_clock_out: actualClockOutIso,
+          minimum_reporting_applied:
+            minimumReportingApplied ? 1 : 0,
+          applied_min_reporting_hours:
+            appliedMinimumReportingHours,
           status: 'Approved',
-          updated_at: nowIso
+          updated_at: actualClockOutIso
         })
         .eq('company_id', companyId)
         .eq('id', activePunchId);
@@ -1268,8 +1363,8 @@ export default function TimeClockDashboard() {
         await supabase
           .from('time_punch_breaks')
           .update({
-            break_end: nowIso,
-            updated_at: nowIso
+            break_end: actualClockOutIso,
+            updated_at: actualClockOutIso
           })
           .eq('company_id', companyId)
           .eq('id', activeBreakId);

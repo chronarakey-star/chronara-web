@@ -43,6 +43,9 @@ interface TimePunch {
   employee_id: string;
   clock_in: string;
   clock_out: string | null;
+  actual_clock_out?: string | null;
+  minimum_reporting_applied?: number;
+  applied_min_reporting_hours?: number;
   status: string;
   type: string;
   req_clock_in?: string | null;
@@ -201,8 +204,6 @@ export default function MyTimecards() {
       if (!punchesData) return;
 
       // 2. Fetch dependencies
-      const { data: settingsData } = await supabase.from('store_time_clock_settings').select('store_id, min_reporting_pay, min_reporting_hours, round_time_punches, rounding_increment_mins').eq('company_id', compId);
-      const { data: schedulesData } = await supabase.from('schedules').select('employee_id, date').eq('company_id', compId);
       const punchIds = punchesData.map(
         (p: any) => p.id
       );
@@ -217,7 +218,7 @@ export default function MyTimecards() {
               
           : { data: [] };
 
-      const schedSet = new Set(schedulesData?.map((s: any) => `${s.employee_id}_${s.date}`));
+
       let totalHours = 0;
       
       // Cache formatters to prevent memory lag in the .map loop
@@ -228,7 +229,6 @@ export default function MyTimecards() {
         const store = currentStores.find(s => s.id === p.store_id);
         const storeTz = store?.timezone_id || getStoreTimezone(store?.province);
         
-        const sSet: any = settingsData?.find((s: any) => s.store_id === p.store_id) || {};
         const roundMins = parseInt(p.applied_rounding_mins || "0", 10);
         const isRounded = roundMins > 0;
 
@@ -262,13 +262,27 @@ export default function MyTimecards() {
           const netSec = Math.max(0, grossSec - breakSec);
           hours = netSec / 3600.0;
 
-          if ((sSet.min_reporting_pay === 1 || String(sSet.min_reporting_pay).toLowerCase() === "true") && hours > 0 && hours < parseFloat(sSet.min_reporting_hours || "3.0")) {
-             const localDateStr = getZonedDateStr(dtIn, storeTz);
-             if (schedSet.has(`${p.employee_id}_${localDateStr}`)) {
-                hours = parseFloat(sSet.min_reporting_hours || "3.0");
-                isPadded = true;
-             }
+          const minimumReportingApplied =
+            Number(
+              p.minimum_reporting_applied || 0
+            ) === 1;
+
+          const appliedMinimumHours =
+            Number(
+              p.applied_min_reporting_hours || 0
+            );
+
+          if (
+            minimumReportingApplied &&
+            appliedMinimumHours > hours
+          ) {
+            hours = appliedMinimumHours;
           }
+
+          isPadded =
+            minimumReportingApplied &&
+            appliedMinimumHours > 0;
+
           totalHours += hours;
         }
 

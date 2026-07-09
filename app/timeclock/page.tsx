@@ -703,93 +703,339 @@ export default function TimeClockLogin() {
     }
   };
 
-  const handleQuickClockOut = async (e: React.FormEvent) => {
+  const handleQuickClockOut = async (
+    e: React.FormEvent
+  ) => {
     e.preventDefault();
-    if (punchStatus !== "CLOCKED_IN" || !activePunchId || !quickEmpId) return;
-    
-    // Default to right now
-    let finalOutIso = new Date().toISOString(); 
-    const activeTz = getActiveTimezone();
+
+    if (
+      punchStatus !== "CLOCKED_IN"
+      || !activePunchId
+      || !quickEmpId
+    ) {
+      return;
+    }
+
+    const actualClockOutIso =
+      new Date().toISOString();
+
+    const actualClockOutDate =
+      new Date(actualClockOutIso);
+
+    const activeTz =
+      getActiveTimezone();
+
+    let minimumReportingApplied = false;
+    let appliedMinimumReportingHours = 0;
 
     try {
-      const { data: punchData } = await supabase
-        .from('time_punches')
-        .select('clock_in, store_id')
-        .eq('company_id', companyId)
-        .eq('id', activePunchId)
+      const { data: punchData, error: punchError } =
+        await supabase
+          .from('time_punches')
+          .select(
+            'clock_in, store_id, applied_rounding_mins'
+          )
+          .eq(
+            'company_id',
+            companyId
+          )
+          .eq(
+            'id',
+            activePunchId
+          )
+          .single();
 
-        .single();
-      
-      if (punchData && punchData.clock_in) {
-          const clockInDt = new Date(punchData.clock_in);
-          const activeStoreId = punchData.store_id || selectedStore;
-
-          const { data: settingsData } = await supabase.from('store_time_clock_settings')
-            .select('min_reporting_pay, min_reporting_hours, round_time_punches, rounding_increment_mins')
-            .eq('store_id', activeStoreId).limit(1);
-
-          const s = settingsData?.[0];
-          const minPayActive = s?.min_reporting_pay === 1 || String(s?.min_reporting_pay).toLowerCase() === "true";
-          const minHrs = parseFloat(s?.min_reporting_hours as string) || 3.0;
-
-          // Calculate current net hours (simplified for the gatekeeper check)
-          const grossSec = (new Date().getTime() - clockInDt.getTime()) / 1000;
-          const { data: breaksData } = await supabase
-            .from('time_punch_breaks')
-            .select('break_start, break_end')
-            .eq('company_id', companyId)
-            .eq('punch_id', activePunchId)
-            .eq('break_type', 'Unpaid')
-    ;
-          let breakSec = 0;
-          breaksData?.forEach(b => {
-             if (b.break_start && b.break_end) breakSec += (new Date(b.break_end).getTime() - new Date(b.break_start).getTime()) / 1000;
-          });
-
-          const netHours = Math.max(0, grossSec - breakSec) / 3600.0;
-
-          if (minPayActive && netHours < minHrs) {
-              const dateStr = getLocalYYYYMMDD(clockInDt, activeTz);
-              const { data: schedData } = await supabase.from('schedules').select('id').eq('employee_id', quickEmpId).eq('date', dateStr).limit(1);
-              
-              if (schedData && schedData.length > 0) {
-                  // Apply the 3-Hour Rule padding
-                  const paddedSec = breakSec + (minHrs * 3600.0);
-                  finalOutIso = new Date(clockInDt.getTime() + (paddedSec * 1000)).toISOString();
-              }
-          }
+      if (punchError) {
+        throw punchError;
       }
 
-      const { error } = await supabase
-        .from('time_punches')
-        .update({
-          clock_out: finalOutIso,
-          status: 'Approved',
-          updated_at: finalOutIso
-        })
-        .eq('company_id', companyId)
-        .eq('id', activePunchId);
+      if (
+        punchData
+        && punchData.clock_in
+      ) {
+        const clockInDate =
+          new Date(
+            punchData.clock_in
+          );
 
-      if (error) throw error;
+        const activeStoreId =
+          punchData.store_id
+          || selectedStore;
+
+        const { data: settingsData } =
+          await supabase
+            .from(
+              'store_time_clock_settings'
+            )
+            .select(
+              'min_reporting_pay, min_reporting_hours'
+            )
+            .eq(
+              'company_id',
+              companyId
+            )
+            .eq(
+              'store_id',
+              activeStoreId
+            )
+            .limit(1);
+
+        const settings =
+          settingsData?.[0];
+
+        const minimumPayActive =
+          settings?.min_reporting_pay === 1
+          || String(
+            settings?.min_reporting_pay
+          ).toLowerCase() === "true";
+
+        const minimumHours =
+          parseFloat(
+            settings?.min_reporting_hours as string
+          ) || 3.0;
+
+        const roundMins =
+          Number(
+            punchData.applied_rounding_mins || 0
+          );
+
+        const roundDate = (
+          date: Date,
+          minutes: number
+        ) => {
+          if (minutes <= 0) {
+            return date;
+          }
+
+          const intervalMs =
+            minutes * 60 * 1000;
+
+          const remainder =
+            date.getTime() % intervalMs;
+
+          let roundedTime =
+            date.getTime() - remainder;
+
+          if (
+            remainder >= intervalMs / 2
+          ) {
+            roundedTime += intervalMs;
+          }
+
+          return new Date(roundedTime);
+        };
+
+        const roundedClockIn =
+          roundDate(
+            clockInDate,
+            roundMins
+          );
+
+        const roundedClockOut =
+          roundDate(
+            actualClockOutDate,
+            roundMins
+          );
+
+        const grossSeconds =
+          (
+            roundedClockOut.getTime()
+            - roundedClockIn.getTime()
+          ) / 1000.0;
+
+        const { data: breaksData } =
+          await supabase
+            .from(
+              'time_punch_breaks'
+            )
+            .select(
+              'break_start, break_end'
+            )
+            .eq(
+              'company_id',
+              companyId
+            )
+            .eq(
+              'punch_id',
+              activePunchId
+            )
+            .eq(
+              'break_type',
+              'Unpaid'
+            );
+
+        let breakSeconds = 0;
+
+        for (
+          const breakRow
+          of breaksData || []
+        ) {
+          if (!breakRow.break_start) {
+            continue;
+          }
+
+          let breakStart =
+            new Date(
+              breakRow.break_start
+            );
+
+          let breakEnd =
+            breakRow.break_end
+              ? new Date(
+                  breakRow.break_end
+                )
+              : actualClockOutDate;
+
+          breakStart =
+            roundDate(
+              breakStart,
+              roundMins
+            );
+
+          breakEnd =
+            roundDate(
+              breakEnd,
+              roundMins
+            );
+
+          breakSeconds += Math.max(
+            0,
+            (
+              breakEnd.getTime()
+              - breakStart.getTime()
+            ) / 1000.0
+          );
+        }
+
+        const netHours =
+          Math.max(
+            0,
+            grossSeconds
+            - breakSeconds
+          ) / 3600.0;
+
+        if (
+          minimumPayActive
+          && netHours < minimumHours
+        ) {
+          const localDate =
+            getLocalYYYYMMDD(
+              clockInDate,
+              activeTz
+            );
+
+          const { data: scheduleData } =
+            await supabase
+              .from('schedules')
+              .select('id')
+              .eq(
+                'company_id',
+                companyId
+              )
+              .eq(
+                'employee_id',
+                quickEmpId
+              )
+              .eq(
+                'store_id',
+                activeStoreId
+              )
+              .eq(
+                'date',
+                localDate
+              )
+              .limit(1);
+
+          if (
+            scheduleData
+            && scheduleData.length > 0
+          ) {
+            minimumReportingApplied = true;
+            appliedMinimumReportingHours =
+              minimumHours;
+          }
+        }
+      }
+
+      const { error } =
+        await supabase
+          .from('time_punches')
+          .update({
+            clock_out:
+              actualClockOutIso,
+
+            actual_clock_out:
+              actualClockOutIso,
+
+            minimum_reporting_applied:
+              minimumReportingApplied
+                ? 1
+                : 0,
+
+            applied_min_reporting_hours:
+              appliedMinimumReportingHours,
+
+            status:
+              'Approved',
+
+            updated_at:
+              actualClockOutIso
+          })
+          .eq(
+            'company_id',
+            companyId
+          )
+          .eq(
+            'id',
+            activePunchId
+          );
+
+      if (error) {
+        throw error;
+      }
 
       if (activeBreakId) {
         await supabase
-          .from('time_punch_breaks')
+          .from(
+            'time_punch_breaks'
+          )
           .update({
-            break_end: finalOutIso,
-            updated_at: finalOutIso
+            break_end:
+              actualClockOutIso,
+
+            updated_at:
+              actualClockOutIso
           })
-          .eq('company_id', companyId)
-          .eq('id', activeBreakId);
+          .eq(
+            'company_id',
+            companyId
+          )
+          .eq(
+            'id',
+            activeBreakId
+          );
       }
 
       setFeedbackModal({
-          type: "success", title: "Shift Complete", message: "You have successfully clocked out. Have a great day!",
-          subMessage: `Clocked OUT at ${new Date().toLocaleTimeString('en-US', { timeZone: activeTz, hour: 'numeric', minute: '2-digit', hour12: true })}`
+        type: "success",
+        title: "Shift Complete",
+        message:
+          "You have successfully clocked out. Have a great day!",
+        subMessage:
+          `Clocked OUT at ${
+            new Date().toLocaleTimeString(
+              'en-US',
+              {
+                timeZone: activeTz,
+                hour: 'numeric',
+                minute: '2-digit',
+                hour12: true
+              }
+            )
+          }`
       });
 
-      // CRITICAL: Reset UI state immediately to prevent overlap attempts
-      setUsername(""); 
+      setUsername("");
       setPassword("");
       setPunchStatus("INVALID");
       setQuickEmpId(null);
@@ -797,9 +1043,20 @@ export default function TimeClockLogin() {
       setActiveBreakId(null);
 
     } catch (err) {
-      setFeedbackModal({ type: "error", title: "Error", message: "Error Clocking Out. Please try again." });
+      console.error(
+        "Quick clock-out failed:",
+        err
+      );
+
+      setFeedbackModal({
+        type: "error",
+        title: "Error",
+        message:
+          "Error Clocking Out. Please try again."
+      });
     }
   };
+
 
   const handleQuickStartBreak = async (breakType: "Paid" | "Unpaid") => {
     if (punchStatus !== "CLOCKED_IN" || !activePunchId) return;
